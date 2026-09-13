@@ -13,6 +13,11 @@ requirements on the storage underneath:
 This directory adds a third storage that meets both, on top of
 [QLever](https://github.com/ad-freiburg/qlever).
 
+The motivation is maintenance, not speed. Passage's main backend is
+Blazegraph, which is no longer maintained; QLever is actively developed. A
+backend that merely reaches comparable performance is therefore already worth
+having, because it replaces a dependency that has no future.
+
 Requirement (1) holds for free: QLever enumerates a triple pattern in the order
 of the permutation it is scanned in, which is deterministic and stable for a
 fixed index and a fixed snapshot of the delta triples. Requirement (2) did not
@@ -198,11 +203,11 @@ Verified:
 
 Not verified, in decreasing order of how much it matters:
 
-* **Throughput.** Nothing here says whether running the joins in
-  `passage-volcano` over QLever scans beats the Blazegraph backend, or whether
-  the JNI boundary costs more than QLever's storage gains. That is the question
-  this backend exists to answer, and it needs a real workload (WDBench) on a
-  machine that can hold the index.
+* **Throughput.** Nothing here measures how this backend compares to the
+  Blazegraph one on a real workload (WDBench), nor what the JNI boundary
+  actually costs. Note what the bar is: the point of this backend is to replace
+  an unmaintained dependency, so comparable performance suffices and only a
+  large regression would be a problem.
 * **Scale.** The Passage run uses six triples; it exercises correctness, not
   the offset skipping.
 * **Coverage.** Only basic graph patterns were driven end to end. `OPTIONAL`,
