@@ -3,6 +3,12 @@
 This patch makes `OFFSET` on a single triple pattern cost constant time instead
 of time proportional to the offset.
 
+It was written for [Passage](https://github.com/passage-org/passage), whose
+continuation queries carry their state as an `OFFSET` on a triple pattern; see
+[PASSAGE-QLEVER-BACKEND.md](PASSAGE-QLEVER-BACKEND.md) for the backend that
+builds on it. The change itself is independent of that use, and speeds up any
+`OFFSET` pushed down to a single triple pattern.
+
 ## The problem
 
 `IndexScan` already pushes `LIMIT`/`OFFSET` all the way down into the
