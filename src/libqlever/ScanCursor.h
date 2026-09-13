@@ -85,24 +85,30 @@ class ScanCursor {
   ScanCursor& operator=(const ScanCursor&) = delete;
 
   // Return true iff the cursor currently points at a match, that is, iff the
-  // getters below may be called.
-  bool hasNext() const;
+  // getters below may be called. NOTE: Not `const`, because the underlying scan
+  // is only opened when the cursor is first read from (see `skip`).
+  bool hasNext();
 
   // Advance the cursor to the next match. May only be called when `hasNext()`.
   void next();
 
   // The `component` of the match that the cursor currently points at. May only
   // be called when `hasNext()`.
-  Id getId(Component component) const;
+  Id getId(Component component);
 
   // The `component` of the current match, as it would be written in a SPARQL
   // query. May only be called when `hasNext()`.
-  std::string getString(Component component) const;
+  std::string getString(Component component);
 
   // Position the cursor at the match with index `offset` (zero-based), skipping
   // over the preceding matches without reading them where the index metadata
   // allows it (see `seekToOffset` in `CompressedRelation.cpp`). An `offset`
   // beyond the last match leaves the cursor exhausted.
+  //
+  // NOTE: A cursor does not read anything until it is first asked for a match.
+  // This matters because `Backend.search` of an engine such as Passage takes no
+  // offset: it creates the scan and only then skips it into position. Opening
+  // the scan eagerly would decompress the first block just to discard it.
   void skip(uint64_t offset);
 
   // The offset of the match that the cursor currently points at, or the number
@@ -136,8 +142,11 @@ class ScanCursor {
   // resolved to `Id`s and reordered into the order of the permutation.
   void initialize(const IndexImpl& index, ScanSpecification spec);
 
-  // Discard the current scan and start a new one at `offset`.
-  void restartAt(uint64_t offset);
+  // Position the cursor at `offset` without opening a scan for it yet.
+  void positionAt(uint64_t offset);
+
+  // Open the scan at the pending offset, unless it is already open.
+  void ensureStarted();
 
   // Make `block_` point at a block that still has an unread row, or clear it if
   // the scan is exhausted.
@@ -163,6 +172,8 @@ class ScanCursor {
   std::optional<IdTable> block_;
   size_t rowInBlock_ = 0;
   uint64_t current_ = 0;
+  // False while the cursor is positioned but has not read anything yet.
+  bool started_ = false;
 };
 
 }  // namespace qlever

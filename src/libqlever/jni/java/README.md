@@ -66,7 +66,12 @@ java -cp "$CP:classes"          PassageOnQlever "$LIB" fig2
 * **`BackendTest`** does the same through `Backend<Long, String>` and
   `BackendIterator<Long, String>`, that is, through the types
   `passage-volcano` sees.
-* **`SkipBench`** times 200 random deep skips. Run it once as built, then again
+* **`SearchThenSkipBench`** times the pattern that Passage actually uses:
+  `Backend.search` takes no offset, so a scan is created and only then skipped
+  into position. This is what the cursor's laziness is for; against a cursor
+  that opens its scan eagerly it costs 0.764 ms per scan instead of 0.416 ms,
+  because the first block is decompressed only to be discarded by the `skip`.
+* **`SkipBench`** times 200 random deep skips on a single cursor. Run it once as built, then again
   against a build with the block skipping reverted
   (`git revert` the commit described in
   [PASSAGE-README.md](../../../../PASSAGE-README.md)) to reproduce the

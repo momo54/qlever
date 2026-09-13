@@ -92,7 +92,7 @@ void ScanCursor::initialize(const IndexImpl& index, ScanSpecification spec) {
   scanSpecAndBlocks_ = index.getPermutation(permutation_)
                            .getScanSpecAndBlocks(scanSpec_.value(),
                                                  *locatedTriples_);
-  restartAt(0);
+  positionAt(0);
 }
 
 // _____________________________________________________________________________
@@ -115,14 +115,24 @@ ScanCursor::ScanCursor(ScanCursor&&) noexcept = default;
 ScanCursor& ScanCursor::operator=(ScanCursor&&) noexcept = default;
 
 // _____________________________________________________________________________
-void ScanCursor::restartAt(uint64_t offset) {
+void ScanCursor::positionAt(uint64_t offset) {
   current_ = offset;
   block_.reset();
+  blocks_.reset();
   rowInBlock_ = 0;
+  started_ = false;
+}
+
+// _____________________________________________________________________________
+void ScanCursor::ensureStarted() {
+  if (started_) {
+    return;
+  }
+  started_ = true;
   blocks_ = index_->getPermutation(permutation_)
                 .lazyScan(scanSpecAndBlocks_.value(), std::nullopt, {},
                           cancellationHandle_, *locatedTriples_,
-                          LimitOffsetClause{std::nullopt, offset});
+                          LimitOffsetClause{std::nullopt, current_});
   advanceToNextNonEmptyBlock();
 }
 
@@ -140,7 +150,10 @@ void ScanCursor::advanceToNextNonEmptyBlock() {
 }
 
 // _____________________________________________________________________________
-bool ScanCursor::hasNext() const { return block_.has_value(); }
+bool ScanCursor::hasNext() {
+  ensureStarted();
+  return block_.has_value();
+}
 
 // _____________________________________________________________________________
 void ScanCursor::next() {
@@ -151,7 +164,7 @@ void ScanCursor::next() {
 }
 
 // _____________________________________________________________________________
-Id ScanCursor::getId(Component component) const {
+Id ScanCursor::getId(Component component) {
   AD_CONTRACT_CHECK(hasNext());
   // Find the column of the permutation that stores the requested component.
   auto asIndex = static_cast<uint8_t>(component);
@@ -170,7 +183,7 @@ Id ScanCursor::getId(Component component) const {
 }
 
 // _____________________________________________________________________________
-std::string ScanCursor::getString(Component component) const {
+std::string ScanCursor::getString(Component component) {
   static const LocalVocab emptyLocalVocab{};
   auto literalOrIri = ql::exportIds::idToLiteralOrIri(
       *index_, getId(component), emptyLocalVocab);
@@ -183,6 +196,12 @@ std::string ScanCursor::getString(Component component) const {
 
 // _____________________________________________________________________________
 void ScanCursor::skip(uint64_t offset) {
+  // Skipping before anything has been read costs nothing at all: the scan has
+  // not been opened yet, so it will simply be opened at `offset`.
+  if (!started_) {
+    current_ = offset;
+    return;
+  }
   // Skipping forwards within the block that is already decompressed is free,
   // and it is the common case when a caller skips by a handful of elements.
   if (block_.has_value() && offset >= current_) {
@@ -193,7 +212,7 @@ void ScanCursor::skip(uint64_t offset) {
       return;
     }
   }
-  restartAt(offset);
+  positionAt(offset);
 }
 
 // _____________________________________________________________________________
