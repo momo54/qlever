@@ -374,6 +374,17 @@ bool CompressedRelationReader::FilterDuplicatesAndGraphs::canBlockBeSkipped(
   return ql::ranges::none_of(block.graphInfo_.value(), isGraphAllowedLambda());
 }
 
+// ______________________________________________________________________________
+bool CompressedRelationReader::FilterDuplicatesAndGraphs::numRowsIsExact(
+    const CompressedBlockMetadata& blockMetadata) const {
+  // Note: `deleteGraphColumn_` only removes a column, never a row, so it is
+  // irrelevant here. These are exactly the two conditions under which
+  // `postprocessBlock` leaves the number of rows unchanged, see
+  // `filterByGraphIfNecessary` and `filterDuplicatesIfNecessary`.
+  return graphFilter_.areAllGraphsAllowed() &&
+         !blockMetadata.containsDuplicatesWithDifferentGraphs_;
+}
+
 // _____________________________________________________________________________
 CompressedRelationReader::IdTableGeneratorInputRange
 CompressedRelationReader::lazyScan(
@@ -437,10 +448,55 @@ CompressedRelationReader::lazyScan(
           reader_{reader},
           config_{config} {}
 
+    // Advance `beginBlockMetadata_` past all leading blocks that are consumed
+    // completely by the `OFFSET`, without reading or decompressing them, and
+    // reduce the `OFFSET` accordingly. Without this, an `OFFSET` of n costs
+    // O(n), because every skipped block is read and decompressed only for
+    // `pruneBlock` to throw its rows away.
+    //
+    // The `numRows_` from the metadata may only be used for this if the block
+    // contributes exactly that many rows to the result, which requires that
+    //   (1) the whole block is part of the result, that is, its first and its
+    //       last triple both match the `scanSpec_`, so that
+    //       `readPossiblyIncompleteBlock` would not drop any row,
+    //   (2) `postprocessBlock` removes no row (see `numRowsIsExact`), and
+    //   (3) the block is not modified by delta triples. Note that
+    //       `LocatedTriplesPerBlock::numTriples` is only an upper bound, so we
+    //       cannot correct for updates and have to exclude such blocks.
+    // As soon as one of these does not hold for a block, we stop skipping and
+    // let the regular code path consume the remaining `OFFSET`, which is then
+    // simply as slow as before, but still correct.
+    //
+    // The last block is never skipped, so that the invariant
+    // `beginBlockMetadata_ < endBlockMetadata_` of `get()` is preserved also
+    // for an `OFFSET` that exceeds the size of the result. That block is then
+    // read and `pruneBlock` correctly empties it.
+    void seekToOffset() {
+      uint64_t& offset = limitOffset_._offset;
+      auto blockIsSkippable = [this](const CompressedBlockMetadata& block) {
+        return config_.graphFilter_.numRowsIsExact(block) &&
+               !locatedTriplesPerBlock_.containsTriples(block.blockIndex_) &&
+               isTripleInSpecification(scanSpec_, block.firstTriple_) &&
+               isTripleInSpecification(scanSpec_, block.lastTriple_);
+      };
+      while (beginBlockMetadata_ + 1 < endBlockMetadata_ &&
+             offset >= beginBlockMetadata_->numRows_ &&
+             blockIsSkippable(*beginBlockMetadata_)) {
+        offset -= beginBlockMetadata_->numRows_;
+        ++beginBlockMetadata_;
+      }
+    }
+
     void start() {
       beginBlockMetadata_ = ql::ranges::begin(relevantBlockMetadata_);
       endBlockMetadata_ = ql::ranges::end(relevantBlockMetadata_);
 
+      seekToOffset();
+
+      // NOTE: This has to be computed after `seekToOffset`, because the blocks
+      // that were skipped there are never read, and `checkInvariantsAtEnd`
+      // compares this number against the number of blocks that were actually
+      // read or skipped because of their graph.
       numBlocksTotal_ = endBlockMetadata_ - beginBlockMetadata_;
     }
 

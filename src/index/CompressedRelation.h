@@ -681,6 +681,14 @@ class CompressedRelationReader {
     // disk, and if this fact can be determined by `blockMetadata` alone.
     bool canBlockBeSkipped(const CompressedBlockMetadata& blockMetadata) const;
 
+    // Return true iff `postprocessBlock` will not remove any row from the
+    // block specified by `blockMetadata`, so that the block contributes exactly
+    // its `numRows_` rows to the result. This is the case if no row can be
+    // filtered out because of its graph, and if the block contains no
+    // duplicates that only differ in their graph. This allows an `OFFSET` to
+    // skip such a block without reading it, see `seekToOffset` in `lazyScan`.
+    bool numRowsIsExact(const CompressedBlockMetadata& blockMetadata) const;
+
     // Delete the `graphColumn_` from `block` if `deleteGraphColumn_` is true.
     void deleteGraphColumnIfNecessary(IdTable& block) const;
 
