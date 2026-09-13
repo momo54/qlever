@@ -70,6 +70,20 @@ All the scans of one `QLeverBackend` share a single
 whole sequence of continuation queries. An update applied in between would
 shift them.
 
+### When a scan is opened
+
+A cursor reads nothing until it is first asked for a match. This is not an
+implementation detail but a consequence of the `Backend` interface:
+`search(s, p, o)` takes no offset, so `PassageScan` creates the scan and only
+then calls `skip` to position it. A cursor that opened its scan eagerly would
+decompress its first block just for the `skip` to discard it and open another
+scan — two block decompressions per scan, on the path where a continuation
+engine spends its time, since every scan it creates starts with an offset.
+Deferring makes a `skip` issued before the first read free.
+
+The visible consequence is that `hasNext`, `getId` and `getString` are not
+`const`: they may open the scan.
+
 ### Crossing the boundary
 
 `BackendIterator` is a tuple-at-a-time interface and QLever reads blocks of
@@ -198,8 +212,15 @@ Verified:
   1,999,990 and the matching solution come back in well under a millisecond.
   Against the same build without the block skipping, 200 random deep skips cost
   6.125 ms each instead of 0.430 ms.
+* 200 iterations of `search` + `skip` to a random offset + read, which is the
+  pattern a continuation engine repeats: 0.416 ms each, against 0.764 ms for a
+  cursor that opens its scan eagerly.
 * A BGP through `passage-volcano`, as above: termination, and complete and
   correct results.
+
+The programs behind these numbers are in
+[`src/libqlever/jni/java/demo`](src/libqlever/jni/java/demo), with a
+[README](src/libqlever/jni/java/README.md) saying which index each expects.
 
 Not verified, in decreasing order of how much it matters:
 
