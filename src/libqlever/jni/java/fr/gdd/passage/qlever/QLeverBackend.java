@@ -3,6 +3,8 @@ package fr.gdd.passage.qlever;
 import fr.gdd.passage.commons.interfaces.Backend;
 import fr.gdd.passage.commons.interfaces.BackendIterator;
 
+import java.util.Objects;
+
 /**
  * A {@link Backend} backed by a QLever index, through the JNI bridge in
  * `src/libqlever/jni/QleverJni.cpp` of the QLever repository.
@@ -32,7 +34,11 @@ public class QLeverBackend implements Backend<Long, String> {
 
     @Override
     public BackendIterator<Long, String> search(Long s, Long p, Long o) {
-        return new QLeverIterator(backend, s, p, o);
+        // NOTE: A caller signals an unbound component with `null`, not with
+        // `any()`; see `PassageScan`, which passes the result of `Substitutor`
+        // straight through.
+        return new QLeverIterator(backend, Objects.isNull(s) ? any : s,
+                Objects.isNull(p) ? any : p, Objects.isNull(o) ? any : o);
     }
 
     @Override
