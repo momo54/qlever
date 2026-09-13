@@ -118,11 +118,25 @@ only on `passage-commons`. They belong in a `passage-qlever` module of the
 Passage repository and live here next to the bridge they bind; move them there
 as they are.
 
+`passage-commons` is not published to any Maven repository, so it has to be
+built from source:
+
 ```bash
-mvn -pl passage-commons -am install -DskipTests     # in the passage checkout
-javac -cp passage-commons-0.2.0.jar:… -d classes \
-      fr/gdd/passage/qlever/*.java
+git clone https://github.com/passage-org/passage.git
+cd passage && mvn -pl passage-commons -am install -DskipTests
 ```
+
+This installs `fr.gdd:passage-commons:0.2.0` locally. That version is the one
+carried by the project's `master` rather than a release, so it moves; this
+backend was written against commit `8d38952`.
+
+```bash
+javac -cp ~/.m2/repository/fr/gdd/passage-commons/0.2.0/passage-commons-0.2.0.jar:… \
+      -d classes fr/gdd/passage/qlever/*.java
+```
+
+See [`src/libqlever/jni/java/README.md`](src/libqlever/jni/java/README.md) for
+the full classpath, which `mvn dependency:build-classpath` produces.
 
 ## Running it
 
