@@ -1,4 +1,4 @@
-add_library(qlever Qlever.cpp NamedCachedQueryBlobManager.cpp)
+add_library(qlever Qlever.cpp NamedCachedQueryBlobManager.cpp ScanCursor.cpp)
 qlever_target_link_libraries(qlever sparqlParser engine qlever_util index)
 
 if (EMSCRIPTEN)
@@ -50,4 +50,27 @@ if (EMSCRIPTEN)
             # package) from the embind bindings.
             "SHELL:--emit-tsd qlever.d.ts"
     )
+endif ()
+
+# JNI bridge that exposes `ScanCursor` to the JVM (see `jni/QleverJni.cpp`).
+# Only the JNI headers are needed: the resulting shared library is loaded *by* a
+# JVM, so it must not link against `libjvm` itself. Built only when the headers
+# are found, so that the usual build is unaffected.
+find_path(QLEVER_JNI_INCLUDE_DIR jni.h
+        HINTS $ENV{JAVA_HOME}/include
+        $ENV{JAVA_HOME}/Contents/Home/include
+        /opt/homebrew/opt/openjdk/include
+        /usr/lib/jvm/default-java/include)
+if (QLEVER_JNI_INCLUDE_DIR AND NOT EMSCRIPTEN)
+    add_library(qleverjni SHARED jni/QleverJni.cpp)
+    # `jni.h` includes the platform header from a sibling directory
+    # (`darwin/jni_md.h` or `linux/jni_md.h`); add both if present.
+    target_include_directories(qleverjni SYSTEM PRIVATE
+            ${QLEVER_JNI_INCLUDE_DIR}
+            ${QLEVER_JNI_INCLUDE_DIR}/darwin
+            ${QLEVER_JNI_INCLUDE_DIR}/linux)
+    qlever_target_link_libraries(qleverjni qlever sparqlParser engine qlever_util index)
+    message(STATUS "Building the QLever JNI bridge, headers from ${QLEVER_JNI_INCLUDE_DIR}")
+else ()
+    message(STATUS "No JNI headers found; skipping the QLever JNI bridge")
 endif ()
