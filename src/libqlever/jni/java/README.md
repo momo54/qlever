@@ -17,14 +17,27 @@ run them to reproduce those numbers rather than taking them on trust.
 
 ## Building
 
+`passage-commons` and `passage-volcano` are **not published to any Maven
+repository** — there is nothing under the `fr.gdd` group on Maven Central — so
+they have to be built from source and installed into the local repository:
+
+```bash
+git clone https://github.com/passage-org/passage.git
+cd passage && mvn -pl passage-volcano -am install -DskipTests
+```
+
+That produces `fr.gdd:passage-commons:0.2.0` and `fr.gdd:passage-volcano:0.2.0`
+in `~/.m2`. NOTE: `0.2.0` is the version carried by the project's `master`, not
+a released one, so it moves; the backend here was written and verified against
+commit `8d38952`.
+
 ```bash
 # The native library, from the root of the QLever checkout.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target qleverjni qlever-index -j $(nproc)
 LIB=$PWD/build/lib/libqleverjni.so        # .dylib on macOS
 
-# `passage-commons` and `passage-volcano`, from a Passage checkout.
-mvn -pl passage-volcano -am install -DskipTests
+# The classpath of the Passage jars installed above.
 CP=passage-volcano/target/passage-volcano-0.2.0.jar:passage-commons/target/passage-commons-0.2.0.jar:$(
     cd passage-volcano && mvn -q dependency:build-classpath \
         -Dmdep.outputFile=/dev/stdout -DincludeScope=compile)
