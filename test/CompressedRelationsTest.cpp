@@ -2090,6 +2090,183 @@ TEST(CompressedRelationWriter, scanWithGraphs) {
   }
 }
 
+namespace {
+// Perform a `lazyScan` with the given `limitOffset` and return the resulting
+// table together with the number of blocks that actually had to be read from
+// disk. The latter is what makes the block skipping of a large `OFFSET`
+// observable.
+struct ScanResultAndNumBlocksRead {
+  IdTable idTable_;
+  size_t numBlocksRead_;
+};
+ScanResultAndNumBlocksRead lazyScanWithLimitOffset(
+    const CompressedRelationReader& reader, const ScanSpecification& scanSpec,
+    const std::vector<CompressedBlockMetadata>& blocks,
+    const LocatedTriplesPerBlock& locatedTriples,
+    LimitOffsetClause limitOffset = {}) {
+  // Deliberately use a single range (and not `getBlockMetadataRangesfromVec`,
+  // which splits randomly), so that the number of blocks read is deterministic.
+  BlockMetadataSpan blockSpan{blocks};
+  BlockMetadataRanges blockRanges{{blockSpan.begin(), blockSpan.end()}};
+  // NOTE: `lazyScan` stores a reference to the cancellation handle, so it must
+  // outlive the scan and must not be a temporary.
+  auto cancellationHandle =
+      std::make_shared<ad_utility::CancellationHandle<>>();
+  auto range = reader.lazyScan(
+      scanSpec,
+      CompressedRelationReader::convertBlockMetadataRangesToVector(
+          CompressedRelationReader::getRelevantBlocks(scanSpec, blockRanges)),
+      {}, cancellationHandle, locatedTriples, ad_utility::globalExecutor(),
+      limitOffset);
+  // Without additional columns, a scan yields exactly the columns that the
+  // `scanSpec` leaves free, see `prepareColumnIndices`.
+  IdTable result{3u - scanSpec.firstFreeColIndex(),
+                 ad_utility::makeUnlimitedAllocator<Id>()};
+  for (const IdTable& table : range) {
+    result.insertAtEnd(table);
+  }
+  return {std::move(result), range.details().numBlocksRead_};
+}
+}  // namespace
+
+// Test that an `OFFSET` skips whole blocks without reading them (see
+// `firstBlockAfterOffset` in `lazyScan`), that the result is exactly the
+// corresponding suffix of the complete scan, and that the skipping is correctly
+// disabled when the block metadata alone does not determine how many rows a
+// block contributes to the result.
+TEST(CompressedRelationReader, largeOffsetSkipsWholeBlocks) {
+  static constexpr int numRows = 64;
+  // Two rows per block, so that the relation spans many blocks.
+  static constexpr size_t rowsPerBlock = 2;
+  ScanSpecification scanSpec{V(42), std::nullopt, std::nullopt};
+
+  // All triples are in the same graph, so no block contains duplicates that
+  // only differ in their graph, the `numRows_` of every block is exact, and
+  // `firstBlockAfterOffset` may skip blocks.
+  {
+    std::vector<RowInput> rows;
+    for (int i = 0; i < numRows; ++i) {
+      rows.push_back({i, 2 * i, 0});
+    }
+    auto [filename, cleanup] = testFilenameWithCleanup();
+    auto [blocks, metaData, reader] =
+        writeAndOpenRelations({RelationInput{42, rows}}, filename,
+                              rowsPerBlock);
+
+    auto full = lazyScanWithLimitOffset(*reader, scanSpec, blocks,
+                                        emptyLocatedTriples);
+    ASSERT_EQ(full.idTable_.numRows(), numRows);
+    // The test is only meaningful if the relation really spans many blocks.
+    ASSERT_GT(full.numBlocksRead_, 8u);
+
+    for (uint64_t offset : {uint64_t{0}, uint64_t{1}, uint64_t{17},
+                            uint64_t{40}, uint64_t{63}, uint64_t{64},
+                            uint64_t{1000}}) {
+      auto res =
+          lazyScanWithLimitOffset(*reader, scanSpec, blocks,
+                                  emptyLocatedTriples, {std::nullopt, offset});
+      IdTable expected = full.idTable_.clone();
+      expected.erase(expected.begin(),
+                     expected.begin() +
+                         std::min<uint64_t>(offset, expected.numRows()));
+      EXPECT_EQ(res.idTable_, expected) << "with OFFSET " << offset;
+      // Skipping never reads more blocks than the unconstrained scan, and for
+      // an `OFFSET` that covers most of the relation it reads far fewer.
+      EXPECT_LE(res.numBlocksRead_, full.numBlocksRead_)
+          << "with OFFSET " << offset;
+      if (offset >= numRows / 2) {
+        EXPECT_LT(res.numBlocksRead_, full.numBlocksRead_ / 2)
+            << "with OFFSET " << offset;
+      }
+    }
+  }
+
+  // Now every triple is contained in two graphs. All blocks then have
+  // `containsDuplicatesWithDifferentGraphs_` set (equal triples always end up
+  // in the same block), so the deduplication in `postprocessBlock` removes rows
+  // and `numRows_` is no longer the number of rows a block contributes.
+  // `firstBlockAfterOffset` must therefore not skip anything, and the result
+  // must still be correct.
+  {
+    std::vector<RowInput> rows;
+    for (int i = 0; i < numRows; ++i) {
+      rows.push_back({i, 2 * i, 0});
+      rows.push_back({i, 2 * i, 1});
+    }
+    auto [filename, cleanup] = testFilenameWithCleanup();
+    auto [blocks, metaData, reader] =
+        writeAndOpenRelations({RelationInput{42, rows}}, filename,
+                              rowsPerBlock);
+
+    auto full = lazyScanWithLimitOffset(*reader, scanSpec, blocks,
+                                        emptyLocatedTriples);
+    // The duplicates that only differ in their graph are removed.
+    ASSERT_EQ(full.idTable_.numRows(), numRows);
+
+    static constexpr uint64_t offset = 40;
+    auto res = lazyScanWithLimitOffset(*reader, scanSpec, blocks,
+                                       emptyLocatedTriples,
+                                       {std::nullopt, offset});
+    IdTable expected = full.idTable_.clone();
+    expected.erase(expected.begin(), expected.begin() + offset);
+    EXPECT_EQ(res.idTable_, expected);
+    // No block was skipped, because for none of them the metadata determines
+    // the number of rows it contributes.
+    EXPECT_EQ(res.numBlocksRead_, full.numBlocksRead_);
+  }
+}
+
+// Test that the skipping of blocks by an `OFFSET` also works for the other
+// shapes of a triple pattern, that is, when no column at all or when the first
+// two columns are fixed by the scan specification. Note that
+// `ScanSpecification::validate` enforces that the fixed columns are always a
+// prefix of `(col0, col1, col2)`, so these are (together with the scan for a
+// single fixed `col0`, which is covered above) all the possible shapes.
+TEST(CompressedRelationReader, largeOffsetSkipsBlocksForAllScanSpecifications) {
+  static constexpr size_t rowsPerBlock = 2;
+  // Three relations, so that a scan without any fixed column spans all of them
+  // and also covers the blocks in which they border on each other.
+  std::vector<RelationInput> inputs;
+  for (int col0 : {17, 42, 96}) {
+    std::vector<RowInput> rows;
+    for (int col1 = 0; col1 < 8; ++col1) {
+      for (int col2 = 0; col2 < 8; ++col2) {
+        rows.push_back({col1, col2, 0});
+      }
+    }
+    inputs.push_back(RelationInput{col0, std::move(rows)});
+  }
+  auto [filename, cleanup] = testFilenameWithCleanup();
+  auto [blocks, metaData, reader] =
+      writeAndOpenRelations(inputs, filename, rowsPerBlock);
+
+  // `?s ?p ?o`: nothing is fixed, so every block belongs to the result in full
+  // and all of them may be skipped.
+  // `<s> <p> ?o`: the first two columns are fixed. The blocks in the middle of
+  // the range may be skipped, but the (at most two) blocks at its border may
+  // contain rows of other `col1` values, so they must be read.
+  for (const auto& [name, scanSpec] :
+       std::vector<std::pair<std::string, ScanSpecification>>{
+           {"nothing fixed", {std::nullopt, std::nullopt, std::nullopt}},
+           {"col0 and col1 fixed", {V(42), V(3), std::nullopt}}}) {
+    auto full =
+        lazyScanWithLimitOffset(*reader, scanSpec, blocks, emptyLocatedTriples);
+    ASSERT_GT(full.numBlocksRead_, 2u) << name;
+    const uint64_t numRows = full.idTable_.numRows();
+
+    // An `OFFSET` that leaves only the last few rows must read far fewer
+    // blocks than the complete scan, while returning the correct suffix.
+    const uint64_t offset = numRows - 2;
+    auto res = lazyScanWithLimitOffset(*reader, scanSpec, blocks,
+                                       emptyLocatedTriples,
+                                       {std::nullopt, offset});
+    IdTable expected = full.idTable_.clone();
+    expected.erase(expected.begin(), expected.begin() + offset);
+    EXPECT_EQ(res.idTable_, expected) << name;
+    EXPECT_LT(res.numBlocksRead_, full.numBlocksRead_ / 2) << name;
+  }
+}
+
 // _____________________________________________________________________________
 TEST(CompressedRelationWriter, blockMustHaveRoomForAtLeastOneRow) {
   std::string filename = gtestCurrentTestName();
