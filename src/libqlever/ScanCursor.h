@@ -45,6 +45,13 @@ namespace qlever {
 // that the cursor was created with do not change, which is what makes the
 // offsets reported by `current()` meaningful across cursors.
 //
+// A cursor can also enumerate the *distinct* values of one or more components
+// (`distinctOn`). That costs nothing beyond the scan itself: the permutation is
+// chosen so that those components come right after the bound ones, hence their
+// values are sorted and equal ones adjacent, and deduplicating is a matter of
+// advancing while they do not change. No sorting, no hash table, no separate
+// operator. See `permutationFor`.
+//
 // NOTE: A cursor keeps the `LocatedTriplesSharedState` it was created with
 // alive, so a sequence of cursors that is meant to enumerate a triple pattern
 // exactly once has to be created from the same snapshot. Otherwise an update
@@ -60,16 +67,21 @@ class ScanCursor {
   //
   // If one of the bound components does not occur in the index's vocabulary,
   // the cursor is immediately exhausted (`hasNext() == false`).
+  // `distinctOn` names the components whose distinct combinations are to be
+  // enumerated; it must not contain a bound component. When it is empty, every
+  // matching triple is enumerated.
   ScanCursor(const IndexImpl& index, std::optional<TripleComponent> subject,
              std::optional<TripleComponent> predicate,
              std::optional<TripleComponent> object,
-             LocatedTriplesSharedState locatedTriples);
+             LocatedTriplesSharedState locatedTriples,
+             ql::span<const Component> distinctOn = {});
 
   // Same, but with the components already resolved to `Id`s, as an engine that
   // caches the `Id`s of the constants of its query would have them.
   ScanCursor(const IndexImpl& index, std::optional<Id> subject,
              std::optional<Id> predicate, std::optional<Id> object,
-             LocatedTriplesSharedState locatedTriples);
+             LocatedTriplesSharedState locatedTriples,
+             ql::span<const Component> distinctOn = {});
 
   // Copy up to `maxTuples` matches into `out`, three `Id`s (subject,
   // predicate, object) per match, and advance the cursor past them. Returns
@@ -130,12 +142,25 @@ class ScanCursor {
   // index metadata alone.
   std::pair<uint64_t, uint64_t> cardinalityEstimate() const;
 
-  // The permutation that a triple pattern with the given bound components is
-  // scanned in. The bound components have to form a prefix of the permutation,
-  // which this mapping guarantees. Exposed for testing.
-  static Permutation::Enum permutationFor(bool subjectIsBound,
-                                          bool predicateIsBound,
-                                          bool objectIsBound);
+  // The permutation in which a triple pattern with the given bound components
+  // is scanned when the distinct combinations of `distinctOn` are wanted.
+  //
+  // The permutation orders the components as `bound`, then `distinctOn`, then
+  // the rest. The bound components have to be a prefix because
+  // `ScanSpecification` requires it; the distinct ones have to come next so
+  // that their values are sorted and equal ones adjacent. For a triple pattern
+  // such an order always exists, because there are only three components and
+  // all six of their orders are materialized as permutations.
+  //
+  // Exposed for testing.
+  static Permutation::Enum permutationFor(
+      bool subjectIsBound, bool predicateIsBound, bool objectIsBound,
+      ql::span<const Component> distinctOn = {});
+
+  // The number of leading components of the permutation whose distinct
+  // combinations this cursor enumerates, that is, `distinctOn.size()`. Zero for
+  // a cursor over all matching triples.
+  size_t numDistinctComponents() const { return numDistinctComponents_; }
 
  private:
   // Shared part of the two constructors, called once the components have been
@@ -152,6 +177,13 @@ class ScanCursor {
   // the scan is exhausted.
   void advanceToNextNonEmptyBlock();
 
+  // Advance by a single stored triple, ignoring `distinctOn`.
+  void advanceOneTriple();
+
+  // True iff the triple the cursor points at agrees with `prefix` on the
+  // columns that `distinctOn` covers. Requires `hasNext()`.
+  bool currentPrefixEquals(ql::span<const Id> prefix);
+
   const IndexImpl* index_;
   LocatedTriplesSharedState locatedTriples_;
   Permutation::Enum permutation_;
@@ -161,6 +193,17 @@ class ScanCursor {
   // The `Id`s of the bound components, in the order of the permutation. Its
   // size is the number of columns that the scan does *not* return.
   std::vector<Id> boundIds_;
+  // The number of components whose distinct combinations are enumerated. They
+  // are the first `numDistinctComponents_` columns that the scan returns.
+  size_t numDistinctComponents_ = 0;
+  // Scratch space for the distinct prefix of the current group, so that
+  // `next` does not allocate.
+  std::vector<Id> currentPrefix_;
+  // The components this cursor deduplicates on, and the `Id`s of the bound
+  // components indexed by component (not by column). Both are only kept so
+  // that `cardinality` can build an equivalent cursor to count with.
+  std::vector<Component> distinctOn_;
+  std::array<std::optional<Id>, 3> boundIdPerComponent_;
   // `std::nullopt` if one of the bound components is not in the vocabulary, in
   // which case the cursor is empty.
   std::optional<ScanSpecification> scanSpec_;

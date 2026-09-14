@@ -10,22 +10,58 @@
 
 namespace qlever {
 
-// _____________________________________________________________________________
-Permutation::Enum ScanCursor::permutationFor(bool subjectIsBound,
-                                             bool predicateIsBound,
-                                             bool objectIsBound) {
+namespace {
+// The `Permutation::Enum` whose `KeyOrder` is `keys`, which has to be a
+// permutation of `(0, 1, 2)`.
+Permutation::Enum permutationWithKeyOrder(const std::array<uint8_t, 3>& keys) {
   using enum Permutation::Enum;
-  // The bound components have to be a prefix of the permutation, see
-  // `ScanSpecification::validate`. Where several permutations qualify, the
-  // choice is arbitrary but fixed, so that the order in which a triple pattern
-  // is enumerated only depends on the pattern itself.
-  if (subjectIsBound) {
-    return objectIsBound && !predicateIsBound ? SOP : SPO;
+  static constexpr std::array<std::pair<std::array<uint8_t, 3>,
+                                        Permutation::Enum>, 6>
+      all{{{{0, 1, 2}, SPO}, {{0, 2, 1}, SOP}, {{1, 0, 2}, PSO},
+           {{1, 2, 0}, POS}, {{2, 0, 1}, OSP}, {{2, 1, 0}, OPS}}};
+  auto it = ql::ranges::find(all, keys, &std::pair<std::array<uint8_t, 3>,
+                                                   Permutation::Enum>::first);
+  AD_CORRECTNESS_CHECK(it != all.end());
+  return it->second;
+}
+}  // namespace
+
+// _____________________________________________________________________________
+Permutation::Enum ScanCursor::permutationFor(
+    bool subjectIsBound, bool predicateIsBound, bool objectIsBound,
+    ql::span<const ScanCursor::Component> distinctOn) {
+  std::array<bool, 3> isBound{subjectIsBound, predicateIsBound, objectIsBound};
+  std::array<bool, 3> isDistinct{false, false, false};
+  for (auto component : distinctOn) {
+    auto index = static_cast<size_t>(component);
+    AD_CONTRACT_CHECK(!isBound.at(index),
+                      "a bound component cannot also be a distinct one");
+    AD_CONTRACT_CHECK(!isDistinct.at(index),
+                      "a component may occur at most once in `distinctOn`");
+    isDistinct.at(index) = true;
   }
-  if (predicateIsBound) {
-    return objectIsBound ? POS : PSO;
+  // Bound components first, then the distinct ones, then the rest. Within each
+  // of the three groups the order is the canonical one, so that the order in
+  // which a pattern is enumerated depends only on the pattern and on
+  // `distinctOn`, never on a query plan.
+  std::array<uint8_t, 3> keys{};
+  size_t next = 0;
+  auto append = [&keys, &next](const std::array<bool, 3>& selected) {
+    for (uint8_t component = 0; component < 3; ++component) {
+      if (selected.at(component)) {
+        keys.at(next++) = component;
+      }
+    }
+  };
+  append(isBound);
+  append(isDistinct);
+  std::array<bool, 3> isRest{};
+  for (size_t i = 0; i < 3; ++i) {
+    isRest.at(i) = !isBound.at(i) && !isDistinct.at(i);
   }
-  return objectIsBound ? OSP : SPO;
+  append(isRest);
+  AD_CORRECTNESS_CHECK(next == 3);
+  return permutationWithKeyOrder(keys);
 }
 
 // _____________________________________________________________________________
@@ -33,11 +69,12 @@ ScanCursor::ScanCursor(const IndexImpl& index,
                        std::optional<TripleComponent> subject,
                        std::optional<TripleComponent> predicate,
                        std::optional<TripleComponent> object,
-                       LocatedTriplesSharedState locatedTriples)
+                       LocatedTriplesSharedState locatedTriples,
+                       ql::span<const Component> distinctOn)
     : index_{&index},
       locatedTriples_{std::move(locatedTriples)},
       permutation_{permutationFor(subject.has_value(), predicate.has_value(),
-                                  object.has_value())},
+                                  object.has_value(), distinctOn)},
       keyOrder_{Permutation::toKeyOrder(permutation_)},
       cancellationHandle_{
           std::make_shared<ad_utility::CancellationHandle<>>()} {
@@ -53,6 +90,8 @@ ScanCursor::ScanCursor(const IndexImpl& index,
       !(cols[0].has_value() && !cols[1].has_value() && cols[2].has_value()),
       "the bound components of a scan have to be a prefix of the permutation");
 
+  numDistinctComponents_ = distinctOn.size();
+  distinctOn_.assign(distinctOn.begin(), distinctOn.end());
   initialize(index, ScanSpecificationAsTripleComponent{cols[0], cols[1],
                                                        cols[2]}
                         .toScanSpecification(index));
@@ -61,11 +100,12 @@ ScanCursor::ScanCursor(const IndexImpl& index,
 // _____________________________________________________________________________
 ScanCursor::ScanCursor(const IndexImpl& index, std::optional<Id> subject,
                        std::optional<Id> predicate, std::optional<Id> object,
-                       LocatedTriplesSharedState locatedTriples)
+                       LocatedTriplesSharedState locatedTriples,
+                       ql::span<const Component> distinctOn)
     : index_{&index},
       locatedTriples_{std::move(locatedTriples)},
       permutation_{permutationFor(subject.has_value(), predicate.has_value(),
-                                  object.has_value())},
+                                  object.has_value(), distinctOn)},
       keyOrder_{Permutation::toKeyOrder(permutation_)},
       cancellationHandle_{
           std::make_shared<ad_utility::CancellationHandle<>>()} {
@@ -74,6 +114,8 @@ ScanCursor::ScanCursor(const IndexImpl& index, std::optional<Id> subject,
   for (size_t i = 0; i < 3; ++i) {
     cols.at(i) = spo.at(keyOrder_.keys().at(i));
   }
+  numDistinctComponents_ = distinctOn.size();
+  distinctOn_.assign(distinctOn.begin(), distinctOn.end());
   initialize(index, ScanSpecification{cols[0], cols[1], cols[2]});
 }
 
@@ -87,6 +129,16 @@ void ScanCursor::initialize(const IndexImpl& index, ScanSpecification spec) {
       break;
     }
     boundIds_.push_back(optId.value());
+  }
+  // Remember the bound `Id`s indexed by component rather than by column, so
+  // that an equivalent cursor can be rebuilt (see `cardinality`).
+  {
+    std::array<std::optional<Id>, 3> perColumn{spec.col0Id(), spec.col1Id(),
+                                               spec.col2Id()};
+    for (size_t column = 0; column < 3; ++column) {
+      boundIdPerComponent_.at(keyOrder_.keys().at(column)) =
+          perColumn.at(column);
+    }
   }
   scanSpec_ = std::move(spec);
   scanSpecAndBlocks_ = index.getPermutation(permutation_)
@@ -156,11 +208,40 @@ bool ScanCursor::hasNext() {
 }
 
 // _____________________________________________________________________________
+void ScanCursor::advanceOneTriple() {
+  ++rowInBlock_;
+  advanceToNextNonEmptyBlock();
+}
+
+// _____________________________________________________________________________
+bool ScanCursor::currentPrefixEquals(ql::span<const Id> prefix) {
+  for (size_t i = 0; i < prefix.size(); ++i) {
+    if (block_.value().at(rowInBlock_, i) != prefix[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// _____________________________________________________________________________
 void ScanCursor::next() {
   AD_CONTRACT_CHECK(hasNext());
-  ++rowInBlock_;
+  if (numDistinctComponents_ == 0) {
+    advanceOneTriple();
+    ++current_;
+    return;
+  }
+  // The distinct components are the leading columns of the scan, so their
+  // values are sorted and equal ones adjacent: skipping the rest of the group
+  // is a matter of advancing while they do not change.
+  currentPrefix_.clear();
+  for (size_t i = 0; i < numDistinctComponents_; ++i) {
+    currentPrefix_.push_back(block_.value().at(rowInBlock_, i));
+  }
+  do {
+    advanceOneTriple();
+  } while (block_.has_value() && currentPrefixEquals(currentPrefix_));
   ++current_;
-  advanceToNextNonEmptyBlock();
 }
 
 // _____________________________________________________________________________
@@ -196,6 +277,22 @@ std::string ScanCursor::getString(Component component) {
 
 // _____________________________________________________________________________
 void ScanCursor::skip(uint64_t offset) {
+  // NOTE: For a cursor over distinct values, `offset` counts groups, not stored
+  // triples, so the block skipping of `firstBlockAfterOffset` (which counts
+  // rows) does
+  // not apply. Until the block metadata carries a count of distinct values, the
+  // only correct way to reach the `offset`-th group is to walk the groups. See
+  // the note on `skip` in the header.
+  if (numDistinctComponents_ > 0) {
+    if (offset < current_) {
+      positionAt(0);
+    }
+    while (current_ < offset && hasNext()) {
+      next();
+    }
+    current_ = std::max(current_, offset);
+    return;
+  }
   // Skipping before anything has been read costs nothing at all: the scan has
   // not been opened yet, so it will simply be opened at `offset`.
   if (!started_) {
@@ -217,6 +314,21 @@ void ScanCursor::skip(uint64_t offset) {
 
 // _____________________________________________________________________________
 uint64_t ScanCursor::cardinality() const {
+  if (numDistinctComponents_ > 0) {
+    // NOTE: Counting the distinct values requires walking them, for the same
+    // reason that `skip` does. `getDistinctColIdsAndCounts` would do it with
+    // fewer decompressions, but it materializes all the values.
+    ScanCursor counting{*index_,
+                        boundIdPerComponent_.at(0),
+                        boundIdPerComponent_.at(1),
+                        boundIdPerComponent_.at(2),
+                        locatedTriples_,
+                        distinctOn_};
+    while (counting.hasNext()) {
+      counting.next();
+    }
+    return counting.current();
+  }
   return index_->getPermutation(permutation_)
       .getResultSizeOfScan(scanSpecAndBlocks_.value(), *locatedTriples_);
 }

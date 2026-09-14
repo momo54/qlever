@@ -50,6 +50,15 @@ std::vector<std::pair<std::string, std::string>> readAll(ScanCursor& cursor) {
 // A cursor over `?s <p> ?o` on the test index.
 struct Fixture {
   QueryExecutionContext* qec_ = ad_utility::testing::getQec(testGraph());
+  ScanCursor makeCursorDistinct(std::optional<TripleComponent> s,
+                                std::optional<TripleComponent> p,
+                                std::optional<TripleComponent> o,
+                                std::vector<ScanCursor::Component> distinct)
+      const {
+    return ScanCursor{qec_->getIndex().getImpl(), std::move(s), std::move(p),
+                      std::move(o), qec_->locatedTriplesSharedState(),
+                      distinct};
+  }
   ScanCursor makeCursor(std::optional<TripleComponent> s,
                         std::optional<TripleComponent> p,
                         std::optional<TripleComponent> o) const {
@@ -178,4 +187,104 @@ TEST(ScanCursor, permutationSelection) {
   EXPECT_EQ(ScanCursor::permutationFor(true, false, true), SOP);
   EXPECT_EQ(ScanCursor::permutationFor(false, true, true), POS);
   EXPECT_EQ(ScanCursor::permutationFor(true, true, true), SPO);
+}
+
+namespace {
+using Components = std::vector<Component>;
+
+// Read a cursor over distinct values to exhaustion, returning the values of
+// `component` as strings.
+std::vector<std::string> readAllDistinct(ScanCursor& cursor,
+                                         Component component) {
+  std::vector<std::string> result;
+  while (cursor.hasNext()) {
+    result.push_back(cursor.getString(component));
+    cursor.next();
+  }
+  return result;
+}
+}  // namespace
+
+// The permutation has to order the components as `bound`, then `distinctOn`,
+// then the rest, so that the distinct components are sorted and equal ones
+// adjacent. For a triple pattern such an order always exists.
+TEST(ScanCursor, permutationSelectionWithDistinct) {
+  using enum Permutation::Enum;
+  auto perm = [](bool s, bool p, bool o, Components distinct) {
+    return ScanCursor::permutationFor(s, p, o, distinct);
+  };
+  // Nothing bound: the distinct component has to come first.
+  EXPECT_EQ(perm(false, false, false, {Component::Subject}), SPO);
+  EXPECT_EQ(perm(false, false, false, {Component::Predicate}), PSO);
+  EXPECT_EQ(perm(false, false, false, {Component::Object}), OSP);
+  // One component bound: the distinct one has to come second.
+  EXPECT_EQ(perm(false, true, false, {Component::Object}), POS);
+  EXPECT_EQ(perm(false, true, false, {Component::Subject}), PSO);
+  EXPECT_EQ(perm(true, false, false, {Component::Object}), SOP);
+  // Two distinct components.
+  EXPECT_EQ(perm(false, false, false, {Component::Subject, Component::Object}),
+            SOP);
+  // A bound component may not also be a distinct one.
+  EXPECT_ANY_THROW(perm(false, true, false, {Component::Predicate}));
+}
+
+// A cursor over distinct values enumerates exactly the distinct values, in the
+// order of the permutation, and reports its position in *that* sequence.
+TEST(ScanCursor, distinctEnumeratesEachValueOnce) {
+  Fixture f;
+  // `<p>` relates 12 subjects to only 4 distinct objects.
+  auto distinctObjects =
+      f.makeCursorDistinct(std::nullopt, iri("p"), std::nullopt,
+                           {Component::Object});
+  auto objects = readAllDistinct(distinctObjects, Component::Object);
+  EXPECT_THAT(objects, SizeIs(4u));
+  EXPECT_THAT(objects, Each(StartsWith("<o")));
+  // No value occurs twice, and they come in the order of the permutation.
+  auto sorted = objects;
+  ql::ranges::sort(sorted);
+  EXPECT_EQ(ql::ranges::unique(sorted).begin() - sorted.begin(), 4);
+
+  // The subjects are all distinct already, so deduplicating changes nothing.
+  auto distinctSubjects =
+      f.makeCursorDistinct(std::nullopt, iri("p"), std::nullopt,
+                           {Component::Subject});
+  EXPECT_THAT(readAllDistinct(distinctSubjects, Component::Subject),
+              SizeIs(12u));
+}
+
+// `skip` on a distinct cursor positions it in the sequence of distinct values,
+// and the offset round trips through a freshly created cursor exactly as it
+// does for a cursor over all triples. This is what makes a distinct scan a
+// continuable leaf.
+TEST(ScanCursor, distinctSkipAndOffsetRoundTrip) {
+  Fixture f;
+  auto reference = f.makeCursorDistinct(std::nullopt, iri("p"), std::nullopt,
+                                        {Component::Object});
+  auto all = readAllDistinct(reference, Component::Object);
+  ASSERT_THAT(all, SizeIs(4u));
+
+  for (uint64_t offset : {uint64_t{0}, uint64_t{1}, uint64_t{3}, uint64_t{4},
+                          uint64_t{100}}) {
+    auto cursor = f.makeCursorDistinct(std::nullopt, iri("p"), std::nullopt,
+                                       {Component::Object});
+    cursor.skip(offset);
+    EXPECT_EQ(cursor.current(), offset) << "with offset " << offset;
+    std::vector<std::string> expected{
+        all.begin() + std::min<size_t>(offset, all.size()), all.end()};
+    EXPECT_EQ(readAllDistinct(cursor, Component::Object), expected)
+        << "with offset " << offset;
+  }
+}
+
+// The number of distinct values, not the number of triples.
+TEST(ScanCursor, distinctCardinality) {
+  Fixture f;
+  auto objects = f.makeCursorDistinct(std::nullopt, iri("p"), std::nullopt,
+                                      {Component::Object});
+  EXPECT_EQ(objects.cardinality(), 4u);
+  auto subjects = f.makeCursorDistinct(std::nullopt, iri("p"), std::nullopt,
+                                       {Component::Subject});
+  EXPECT_EQ(subjects.cardinality(), 12u);
+  auto all = f.makeCursor(std::nullopt, iri("p"), std::nullopt);
+  EXPECT_EQ(all.cardinality(), 12u);
 }
