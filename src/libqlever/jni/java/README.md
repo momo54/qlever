@@ -89,6 +89,10 @@ java -cp "$CP:classes"          PassageOnQlever "$LIB" fig2
   (`git revert` the commit described in
   [PASSAGE-README.md](../../../../PASSAGE-README.md)) to reproduce the
   comparison; the seed is fixed, so both runs use the same offsets.
+* **`DistinctTest`** exercises `Backend.searchDistinct` through the interface on
+  the two million triple index, which has 2,000,000 subjects but only 1,000
+  distinct objects: the counts for each of the three positions, and the round
+  trip of an offset that counts distinct values.
 * **`PassageOnQlever`** drives `passage-volcano` with one scan per execution
   and prints every continuation query it generates. It terminates after six
   executions with the three expected solutions.

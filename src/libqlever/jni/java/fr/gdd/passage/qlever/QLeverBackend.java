@@ -4,6 +4,7 @@ import fr.gdd.passage.commons.interfaces.Backend;
 import fr.gdd.passage.commons.interfaces.BackendIterator;
 
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * A {@link Backend} backed by a QLever index, through the JNI bridge in
@@ -39,6 +40,28 @@ public class QLeverBackend implements Backend<Long, String> {
         // straight through.
         return new QLeverIterator(backend, Objects.isNull(s) ? any : s,
                 Objects.isNull(p) ? any : p, Objects.isNull(o) ? any : o);
+    }
+
+    /**
+     * Enumerate the distinct combinations of the components named by `codes`
+     * (see {@link fr.gdd.passage.commons.generics.BackendConstants} for the SPOC
+     * codes). This is served by a single scan: the permutation is chosen so that
+     * those components lead, hence no sorting and no hash table.
+     */
+    @Override
+    public BackendIterator<Long, String> searchDistinct(Long s, Long p, Long o,
+                                                        Set<Integer> codes) {
+        int mask = 0;
+        for (Integer code : codes) {
+            if (code == null || code < 0 || code > 2) {
+                throw new UnsupportedOperationException(
+                        "the QLever backend can only deduplicate on the subject, the "
+                                + "predicate or the object, not on " + code);
+            }
+            mask |= 1 << code;
+        }
+        return new QLeverIterator(backend, Objects.isNull(s) ? any : s,
+                Objects.isNull(p) ? any : p, Objects.isNull(o) ? any : o, mask);
     }
 
     @Override

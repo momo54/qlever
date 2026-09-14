@@ -52,6 +52,7 @@ from C++ on its own.
 | Passage | QLever |
 | --- | --- |
 | `Backend.search(s, p, o)` | `ScanCursor`, from a `ScanSpecification` |
+| `Backend.searchDistinct(s, p, o, codes)` | a `ScanCursor` whose permutation makes `codes` lead |
 | `Backend.any()` | an unbound component (`std::nullopt`) |
 | `Backend.getId` / `getValue` / `getString` | the vocabulary |
 | `PreemptIterator.skip(to)` | `lazyScan` with an `OFFSET`, which skips whole blocks |
@@ -83,6 +84,30 @@ Deferring makes a `skip` issued before the first read free.
 
 The visible consequence is that `hasNext`, `getId` and `getString` are not
 `const`: they may open the scan.
+
+### Distinct scans
+
+`searchDistinct` is served by the same single scan, with no `Distinct`
+operator, no sort and no hash table. The permutation is chosen so that the
+components to deduplicate on come right after the bound ones, hence their
+values are sorted and equal ones adjacent, and deduplicating is a matter of
+advancing while they do not change.
+
+That choice has to be made together with the bound components, not after them:
+`?s <p> ?o` needs POS to enumerate distinct objects and PSO to enumerate
+distinct subjects, same pattern and same bindings. For a triple pattern such an
+order always exists, since there are only three components and all six of their
+orders are materialized.
+
+The offset of a distinct cursor counts distinct values, so a continuation for
+such a leaf is `SELECT DISTINCT ?x WHERE { pattern } OFFSET k` — an ordinary
+SPARQL query of constant size.
+
+NOTE: `skip` on a distinct cursor walks the groups. The block skipping that
+makes a large `OFFSET` cheap counts stored rows, and a distinct offset counts
+groups, so it does not carry over. Making it logarithmic needs a count of
+distinct values per block, which the block metadata does not have; it could be
+computed at index build time in the pass that already computes `graphInfo_`.
 
 ### Crossing the boundary
 
@@ -248,6 +273,9 @@ Not verified, in decreasing order of how much it matters:
 * **Coverage.** Only basic graph patterns were driven end to end. `OPTIONAL`,
   `FILTER` and `UNION` go through the same `Backend` interface and should
   follow, but they were not run.
+* **Skipping a distinct scan.** Correct, but it walks the groups rather than
+  skipping blocks, so a large `OFFSET` on a high-cardinality distinct column is
+  linear in the offset. See the note above.
 * **Quads.** `search(s, p, o, c)` throws `UnsupportedOperationException`.
   QLever stores quads natively and the cursor does not expose the graph column
   yet; adding it is straightforward.

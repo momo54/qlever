@@ -24,6 +24,13 @@ public final class QLeverNative {
 
     // Cursor over a single triple pattern.
     public static native long search(long backend, long s, long p, long o);
+    /**
+     * As {@link #search}, but enumerating the distinct combinations of the components
+     * selected by `distinctMask`: bit 0 for the subject, 1 for the predicate, 2 for
+     * the object. A mask of 0 is exactly {@link #search}.
+     */
+    public static native long searchDistinct(long backend, long s, long p, long o,
+                                             int distinctMask);
     public static native void closeCursor(long cursor);
     public static native boolean hasNext(long cursor);
     public static native void next(long cursor);

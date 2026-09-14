@@ -154,17 +154,35 @@ JNIEXPORT jstring JNICALL Java_fr_gdd_passage_qlever_QLeverNative_getString(
 
 // ____________________________________________________________________ cursor
 
-JNIEXPORT jlong JNICALL Java_fr_gdd_passage_qlever_QLeverNative_search(
-    JNIEnv* env, jclass, jlong backend, jlong s, jlong p, jlong o) {
+// `distinctMask` selects the components whose distinct combinations are to be
+// enumerated: bit 0 for the subject, 1 for the predicate, 2 for the object. A
+// mask of 0 enumerates every matching triple, which is what `search` does.
+JNIEXPORT jlong JNICALL Java_fr_gdd_passage_qlever_QLeverNative_searchDistinct(
+    JNIEnv* env, jclass, jlong backend, jlong s, jlong p, jlong o,
+    jint distinctMask) {
   return guarded(
       env,
       [&]() -> jlong {
+        using Component = qlever::ScanCursor::Component;
+        std::vector<Component> distinctOn;
+        for (uint8_t component = 0; component < 3; ++component) {
+          if ((distinctMask >> component) & 1) {
+            distinctOn.push_back(static_cast<Component>(component));
+          }
+        }
         auto* handle = fromHandle<BackendHandle>(backend);
         return reinterpret_cast<jlong>(new qlever::ScanCursor{
             handle->index_.getImpl(), toOptionalId(s), toOptionalId(p),
-            toOptionalId(o), handle->locatedTriples_});
+            toOptionalId(o), handle->locatedTriples_, distinctOn});
       },
       0);
+}
+
+JNIEXPORT jlong JNICALL Java_fr_gdd_passage_qlever_QLeverNative_search(
+    JNIEnv* env, jclass, jlong backend, jlong s, jlong p, jlong o) {
+  return Java_fr_gdd_passage_qlever_QLeverNative_searchDistinct(env, nullptr,
+                                                                backend, s, p,
+                                                                o, 0);
 }
 
 JNIEXPORT void JNICALL Java_fr_gdd_passage_qlever_QLeverNative_closeCursor(

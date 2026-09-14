@@ -28,12 +28,22 @@ public class QLeverIterator extends BackendIterator<Long, String> {
     /** The offset of `batch[0]`; the offset of the current match adds `indexInBatch`. */
     long offsetOfBatch = 0;
 
+    /** The components whose distinct combinations are enumerated; 0 for all triples. */
+    final int distinctMask;
+
     public QLeverIterator(long backend, Long subject, Long predicate, Long object) {
+        this(backend, subject, predicate, object, 0);
+    }
+
+    public QLeverIterator(long backend, Long subject, Long predicate, Long object,
+                          int distinctMask) {
         this.backend = backend;
         this.subject = subject;
         this.predicate = predicate;
         this.object = object;
-        this.cursor = QLeverNative.search(backend, subject, predicate, object);
+        this.distinctMask = distinctMask;
+        this.cursor = QLeverNative.searchDistinct(backend, subject, predicate, object,
+                                                  distinctMask);
         fillBatch(0);
     }
 
