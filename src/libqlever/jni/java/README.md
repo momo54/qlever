@@ -93,6 +93,10 @@ java -cp "$CP:classes"          PassageOnQlever "$LIB" fig2
   the two million triple index, which has 2,000,000 subjects but only 1,000
   distinct objects: the counts for each of the three positions, and the round
   trip of an offset that counts distinct values.
+* **`DistinctBench`** times enumerating every object of a triple pattern against
+  enumerating only its distinct objects, on an index where those differ by a
+  factor of 2,000. Both read the same blocks; what the distinct scan saves is
+  the solutions it does not hand across the boundary.
 * **`PassageOnQlever`** drives `passage-volcano` with one scan per execution
   and prints every continuation query it generates. It terminates after six
   executions with the three expected solutions.
