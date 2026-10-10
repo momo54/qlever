@@ -249,11 +249,35 @@ A second one: on a concrete `Backend<Long, String>`, the calls
 refuses them. Passage itself only ever calls `getId` from generic code, where
 `VALUE` is a type variable, so the ambiguity does not arise there.
 
+A third, which cost a wrong answer rather than a compile error.
+`BlazegraphIterator` and `HDTIterator` both **fetch** in `next()`:
+
+```java
+public void next() { this.currentValue = tupleIterator.next(); }
+```
+
+So the iterator starts *before* the first match and a consumer advances before
+reading, which is what `SpliteratorScan` does. `QLeverIterator` started *on* the
+first match and left it in `next()` — the opposite, self-consistent, and what
+its own tests checked, since a test that reads before advancing never notices.
+Through Passage every scan then lost its first match and yielded its last one
+twice, so the totals matched and no count caught it.
+
+`current()` follows from the same choice. Blazegraph increments its offset and
+then fetches, so `current()` is the number of matches **consumed** — the offset
+a continuation resumes from — while `previous()` is the offset of the match in
+hand. Reporting the offset of the match in hand as `current()` is the natural
+reading of the name and the wrong one, and the two shifts cancel under the
+other convention, which is why a round-trip test passes either way.
+
+The interface says only "Iterates to the next element", so neither reading is
+excluded by it. What settles it is that two backends already exist.
+
 ## What is verified, and what is not
 
 Verified:
 
-* `ScanCursorTest` (6 tests) covers the enumeration, `skip`, the choice of
+* `ScanCursorTest` (11 tests) covers the enumeration, `skip`, the choice of
   permutation, and the property the whole design rests on — that the offset
   reported by one cursor, applied to a freshly created one, restores exactly
   the same position.
@@ -266,10 +290,36 @@ Verified:
   cursor that opens its scan eagerly.
 * A BGP through `passage-volcano`, as above: termination, and complete and
   correct results.
+* On WatDiv 10M, three queries run to completion through `passage-volcano`
+  against both this backend and the Blazegraph one, agreeing on every count and
+  on every binding: 10,916,457 solutions for `?s ?p ?o`, 136,215 for
+  `?s a ?c`, and 10,332,352 for their join. That comparison is what found the
+  iterator-convention bug above, which no count of this backend alone would
+  have.
 
 The programs behind these numbers are in
 [`src/libqlever/jni/java/demo`](src/libqlever/jni/java/demo), with a
 [README](src/libqlever/jni/java/README.md) saying which index each expects.
+
+Not verified, in decreasing order of how much it matters:
+
+* **A workload rather than a query.** One join shape on one dataset is not
+  WDBench. What the numbers above establish is where the two differ in kind —
+  scans against point lookups — not an average over a benchmark suite.
+* **Data that exceeds memory.** Both stores fit in this machine's 16 GB, so
+  nothing here tests the regime where QLever's 283 MB against 1.7 GB would
+  start to matter. WatDiv 100M and 1B are on the same Zenodo record.
+* **Coverage.** Only basic graph patterns were driven end to end. `OPTIONAL`,
+  `FILTER` and `UNION` go through the same `Backend` interface and should
+  follow, but they were not run.
+* **Skipping a distinct scan.** Correct, but it walks the groups rather than
+  skipping blocks, so a large `OFFSET` on a high-cardinality distinct column is
+  linear in the offset. See the note above.
+* **Quads.** `search(s, p, o, c)` throws `UnsupportedOperationException`.
+  QLever stores quads natively and the cursor does not expose the graph column
+  yet; adding it is straightforward.
+* **Concurrency.** One `ScanCursor` per thread; the cursor is not thread-safe,
+  and `setMaxParallel` above 1 was not tried.
 
 ## Against Blazegraph, on WatDiv 10M
 
@@ -277,11 +327,14 @@ Measured on 10,916,457 triples, the same data on both sides, with the two
 stores driving the same engine, by `QLeverVsBlazegraphTest` in the Passage
 fork. First 200,000 solutions, median of five timed runs after a warm-up:
 
-| | QLever /s | Blazegraph /s | |
+Each query is run to completion in a JVM of its own, so that neither backend
+inherits a compiled pipeline from the other:
+
+| | QLever | Blazegraph | |
 |---|---|---|---|
-| `?s ?p ?o` | **5,000,000** | 3,846,153 | QLever 1.3x |
-| `?s a ?c` | **8,012,647** | 4,540,500 | QLever 1.8x |
-| `?s a ?c . ?s ?p ?o` | 1,398,601 | **2,985,074** | Blazegraph 2.1x |
+| `?s ?p ?o`, 10,916,457 solutions | **1,510 ms** | 5,355 ms | QLever 3.5x |
+| `?s a ?c`, 136,215 | **303 ms** | 419 ms | QLever 1.4x |
+| `?s a ?c . ?s ?p ?o`, 10,332,352 | 4,363 ms | **3,198 ms** | Blazegraph 1.4x |
 
 They answer identically: the join restricted to `wsdbm:Genre8`, the least
 populated class, has eight solutions, the same on both. QLever's index is
@@ -336,143 +389,3 @@ account for, but that is a guess and not a measurement.
 Against the bar this backend was built to clear — replacing an unmaintained
 dependency at comparable cost — a factor of two on joins against a sixfold
 smaller index, and an advantage on scans, is cleared.
-
-## A convention that is easy to get wrong
-
-`PassageScan` signals an unbound component of a triple pattern with **`null`**,
-not with `Backend.any()`: it hands the output of `Substitutor` straight to
-`Backend.search`. A backend therefore has to map `null` itself, as `HDTBackend`
-does:
-
-```java
-return new QLeverIterator(backend, Objects.isNull(s) ? any() : s, …);
-```
-
-This is not stated on the `Backend` interface, and it is invisible to any test
-that builds its scans itself — those pass `any()` explicitly. The first run of
-a real query through `passage-volcano` is what surfaces it.
-
-A second one: on a concrete `Backend<Long, String>`, the calls
-`getId(String, int...)` and `getId(VALUE, int...)` are ambiguous and `javac`
-refuses them. Passage itself only ever calls `getId` from generic code, where
-`VALUE` is a type variable, so the ambiguity does not arise there.
-
-## What is verified, and what is not
-
-Verified:
-
-* `ScanCursorTest` (6 tests) covers the enumeration, `skip`, the choice of
-  permutation, and the property the whole design rests on — that the offset
-  reported by one cursor, applied to a freshly created one, restores exactly
-  the same position.
-* Through the JNI bridge on a 2,000,000 triple index, `skip` to offset
-  1,999,990 and the matching solution come back in well under a millisecond.
-  Against the same build without the block skipping, 200 random deep skips cost
-  6.125 ms each instead of 0.430 ms.
-* 200 iterations of `search` + `skip` to a random offset + read, which is the
-  pattern a continuation engine repeats: 0.416 ms each, against 0.764 ms for a
-  cursor that opens its scan eagerly.
-* A BGP through `passage-volcano`, as above: termination, and complete and
-  correct results.
-
-The programs behind these numbers are in
-[`src/libqlever/jni/java/demo`](src/libqlever/jni/java/demo), with a
-[README](src/libqlever/jni/java/README.md) saying which index each expects.
-
-## Against Blazegraph, and the block size that decides it
-
-Measured on WatDiv 10M — 10,916,457 triples, the same data on both sides — with
-the two stores driving the same engine, by `QLeverVsBlazegraphTest` in the
-Passage fork. They answer identically; what differs is what they cost, and the
-answer turned on a setting rather than on either design.
-
-The query is `SELECT * WHERE { ?s a ?c . ?s ?p ?o }`, a nested-loop join, so
-its inner pattern is scanned afresh for every outer solution. With QLever's
-default index that is ruinous and with a smaller block size it is not:
-
-| rows per block | opening a scan | the join | `?s ?p ?o` | index |
-|---|---|---|---|---|
-| 31,250 (QLever's default) | 0.915 ms | 24,000 /s | 628,930 /s | 283 MB |
-| 1,000 | **0.048 ms** | 385,356 /s | 651,465 /s | 297 MB |
-| 100 | 0.016 ms | 613,496 /s | 576,368 /s | 610 MB |
-| Blazegraph | 0.072 ms | 743,494 /s | 692,041 /s | 1.7 GB |
-
-The cost is decompressing the first block, which a block-compressed column
-store pays whole however few rows are wanted. It is not the index size (0.853 ms
-over a million triples, 0.861 over eleven million), not the prefetch depth
-(0.856 to 0.860 ms as `lazy-index-scan-num-blocks-in-flight` goes from 20 to 1),
-and not the JNI boundary (0.0004 ms to construct a cursor in C++, 0.933 for its
-first read). A block holds 250 kB per column, so one triple can cost a megabyte
-of Zstd, which is the millisecond measured.
-
-So the default is not a bad one: it is the right trade for merge joins, which
-is what QLever's engine does, and large blocks give those the sequential
-throughput and the compression ratio they want. Passage cannot merge-join,
-because a continuation has to stop mid-join and resume from a query, so it
-nests loops and reads a handful of rows per scan. The same storage, the
-opposite access pattern.
-
-At 1,000 rows per block the join is sixteen times faster for five percent more
-disk, long scans are unchanged, and opening a scan already costs less than
-Blazegraph does. `build-index.sh` in the Passage module builds indexes that
-way; the figures above are what it is for.
-
-That setting, though, is a workaround for something else. The same 2,000 scans
-cost 0.923 ms each when their subjects come out of the index in order and
-0.922 ms when shuffled — no difference at all, although at 31,250 rows a block
-spans some 400 consecutive subjects. Four hundred lookups into one block
-decompress that same megabyte four hundred times, because QLever caches query
-results and vocabulary lookups but not decompressed blocks.
-
-Which is the same design choice again, not an oversight: a merge join never
-returns to a block, so keeping one would be dead weight.
-
-For a nested-loop join it is the whole cost, and the headroom is two orders of
-magnitude rather than one. Asking for the *same* subject two thousand times
-still costs 0.928 ms each, so that one block is decompressed two thousand
-times; reading two thousand rows through a single scan costs 0.0020 ms each.
-
-| 2,000 lookups, default blocks | ms each |
-|---|---|
-| subjects in index order | 0.948 |
-| subjects shuffled | 0.925 |
-| the same subject every time | 0.928 |
-| 2,000 rows through one scan | **0.0020** |
-
-So a cache of a few decompressed blocks is worth about 460x on this access
-pattern, against the 19x the block size buys. A few entries suffice, one per
-scan position that is live at once, which is the join depth times the
-parallelism; a block is 250 kB per column, so the whole cache is a few
-megabytes. It belongs in `CompressedRelationReader`, where this fork already
-patches the `OFFSET` path.
-
-Three things make it a change to design rather than to write. It has to be
-keyed on the delta-triples version as well as the block, or an update would be
-invisible to it — `LocatedTriplesState` already carries a counter for that. It
-has to not take a lock on a path that merge joins walk constantly, since for
-them every lookup is a miss. And for the same reason it has to be off by
-default, which makes its natural shape a runtime parameter that an engine with
-a different access pattern turns on, rather than a new behaviour imposed on
-QLever's own.
-
-What is left runs both ways rather than one. On the join QLever stays 1.9x
-behind at 1,000 rows and 1.3x at 100; on a scan with the predicate bound it is
-twice as fast; and it holds the same data in 297 MB against 1.7 GB. Against the
-bar this backend was built to clear — replacing an unmaintained dependency at
-comparable cost — that is cleared, provided the index is built for it.
-
-Not verified, in decreasing order of how much it matters:
-
-* **Scale.** The Passage run uses six triples; it exercises correctness, not
-  the offset skipping.
-* **Coverage.** Only basic graph patterns were driven end to end. `OPTIONAL`,
-  `FILTER` and `UNION` go through the same `Backend` interface and should
-  follow, but they were not run.
-* **Skipping a distinct scan.** Correct, but it walks the groups rather than
-  skipping blocks, so a large `OFFSET` on a high-cardinality distinct column is
-  linear in the offset. See the note above.
-* **Quads.** `search(s, p, o, c)` throws `UnsupportedOperationException`.
-  QLever stores quads natively and the cursor does not expose the graph column
-  yet; adding it is straightforward.
-* **Concurrency.** One `ScanCursor` per thread; the cursor is not thread-safe,
-  and `setMaxParallel` above 1 was not tried.
