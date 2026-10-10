@@ -192,6 +192,10 @@ namespace {
 // takes a const reference, so nothing is copied. Without that, a scan would
 // report fewer blocks read than it had blocks, which QLever asserts against.
 struct CachedBlock {
+  // Which reader the block came from. Block indices are relative to a
+  // permutation and there is a reader per permutation, so without this the
+  // block 0 of one is served when another asks for its own.
+  const void* reader_;
   size_t blockIndex_;
   std::vector<ColumnIndex> columns_;
   DecompressedBlockAndMetadata blockAndMetadata_;
@@ -202,9 +206,11 @@ thread_local std::vector<CachedBlock> blockCache;
 // The cached entry for `blockIndex` and `columns`, or `nullptr`. A hit is moved
 // to the front, so that a cache of a few entries keeps the ones in use.
 const DecompressedBlockAndMetadata* findCachedBlock(
-    size_t blockIndex, const std::vector<ColumnIndex>& columns) {
+    const void* reader, size_t blockIndex,
+    const std::vector<ColumnIndex>& columns) {
   auto it = ql::ranges::find_if(blockCache, [&](const CachedBlock& entry) {
-    return entry.blockIndex_ == blockIndex && entry.columns_ == columns;
+    return entry.reader_ == reader && entry.blockIndex_ == blockIndex &&
+           entry.columns_ == columns;
   });
   if (it == blockCache.end()) {
     return nullptr;
@@ -216,10 +222,10 @@ const DecompressedBlockAndMetadata* findCachedBlock(
 // Take `blockAndMetadata` into the cache and return a reference to it there,
 // dropping the least recently used entries beyond `capacity`.
 const DecompressedBlockAndMetadata& addCachedBlock(
-    size_t blockIndex, std::vector<ColumnIndex> columns,
+    const void* reader, size_t blockIndex, std::vector<ColumnIndex> columns,
     DecompressedBlockAndMetadata blockAndMetadata, size_t capacity) {
   blockCache.insert(blockCache.begin(),
-                    CachedBlock{blockIndex, std::move(columns),
+                    CachedBlock{reader, blockIndex, std::move(columns),
                                 std::move(blockAndMetadata)});
   if (blockCache.size() > capacity) {
     blockCache.erase(blockCache.begin() + capacity, blockCache.end());
@@ -485,13 +491,15 @@ DecompressedBlock CompressedRelationReader::readPossiblyIncompleteBlock(
   std::optional<DecompressedBlockAndMetadata> read;
   DecompressedBlock empty{config.scanColumns_.size(), allocator_};
   const DecompressedBlockAndMetadata* entry =
-      cacheable ? findCachedBlock(blockMetadata.blockIndex_, config.scanColumns_)
+      cacheable ? findCachedBlock(this, blockMetadata.blockIndex_,
+                                  config.scanColumns_)
                 : nullptr;
   if (entry == nullptr) {
     read = readAndDecompressBlock(blockMetadata, config);
     if (read.has_value() && cacheable) {
-      entry = &addCachedBlock(blockMetadata.blockIndex_, config.scanColumns_,
-                              std::move(read).value(), cacheCapacity);
+      entry = &addCachedBlock(this, blockMetadata.blockIndex_,
+                              config.scanColumns_, std::move(read).value(),
+                              cacheCapacity);
     } else if (read.has_value()) {
       entry = &read.value();
     }
