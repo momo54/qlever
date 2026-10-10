@@ -125,16 +125,27 @@ server built with and without the patch.
 
 ### 1. Build
 
+Two commands, and both are needed. The first only *configures*: it generates
+the build files and compiles nothing. The binaries appear during the second.
+
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target qlever-index qlever-server CompressedRelationsTest -j $(nproc)
 ```
 
-On macOS, `.github/workflows/macos-appleclang-native.yml` is the authoritative
-recipe:
+`cmake --build` writes `build/qlever-index` and `build/qlever-server`, which is
+where step 3 and step 4 below expect them.
+
+On macOS, replace the configure command with the one below. It is
+`.github/workflows/macos-appleclang-native.yml`, the authoritative recipe, plus
+the `range-v3` flag that a recent Apple Clang needs — see
+[what breaks on macOS and why](#what-breaks-on-macos-and-why), which also
+covers the unrelated `abseil` trap. The build command is the same one as above,
+except that `nproc` is GNU coreutils and is not part of a stock macOS:
 
 ```bash
 brew install boost icu4c openssl@3 zstd jemalloc pkg-config
+
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
       -DLOGLEVEL=INFO \
@@ -143,7 +154,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
       -DCOMPILER_SUPPORTS_MARCH_NATIVE=FALSE \
       -DICU_ROOT=$(brew --prefix icu4c) \
       -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
-      -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST
+      -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST \
+      -DCMAKE_CXX_FLAGS=-DMETA_NO_STD_FORWARD_DECLARATIONS
+
+cmake --build build --target qlever-index qlever-server CompressedRelationsTest \
+      -j $(sysctl -n hw.ncpu)
 ```
 
 #### What breaks on macOS and why
