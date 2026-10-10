@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "global/RuntimeParameters.h"
 #include "index/Index.h"
 #include "index/IndexImpl.h"
 #include "index/ExportIds.h"
@@ -86,6 +87,38 @@ auto guarded(JNIEnv* env, F f, decltype(f()) onError) -> decltype(f()) {
 extern "C" {
 
 // ___________________________________________________________________ backend
+
+// How many blocks a lazy scan reads ahead of its consumer, as the runtime
+// parameter `lazy-index-scan-num-blocks-in-flight`. Exposed because an engine
+// that drives the joins itself opens one scan per outer solution, and so pays
+// whatever a scan costs to start; a scan that reads a single block cannot use
+// a prefetch depth of twenty. Must be at least `1`, which a parameter
+// constraint enforces by throwing.
+JNIEXPORT void JNICALL
+Java_fr_gdd_passage_qlever_QLeverNative_setBlocksInFlight(JNIEnv* env, jclass,
+                                                          jlong blocks) {
+  guarded(
+      env,
+      [&]() -> jint {
+        setRuntimeParameter<
+            &RuntimeParameters::lazyIndexScanNumBlocksInFlight_>(
+            static_cast<size_t>(blocks));
+        return 0;
+      },
+      0);
+}
+
+JNIEXPORT jlong JNICALL
+Java_fr_gdd_passage_qlever_QLeverNative_getBlocksInFlight(JNIEnv* env, jclass) {
+  return guarded(
+      env,
+      [&]() -> jlong {
+        return static_cast<jlong>(
+            getRuntimeParameter<
+                &RuntimeParameters::lazyIndexScanNumBlocksInFlight_>());
+      },
+      0);
+}
 
 JNIEXPORT jlong JNICALL Java_fr_gdd_passage_qlever_QLeverNative_openBackend(
     JNIEnv* env, jclass, jstring indexBasename) {
