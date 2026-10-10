@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "../util/IndexTestHelpers.h"
+#include "global/RuntimeParameters.h"
 #include "index/Index.h"
 #include "libqlever/ScanCursor.h"
 #include "parser/TripleComponent.h"
@@ -178,9 +179,28 @@ TEST(ScanCursor, timeCursorCreationAgainstARealIndex) {
   }
   auto oneScanDone = std::chrono::steady_clock::now();
 
+  // The same lookups again, against the size of the block cache. The subjects
+  // come out of the index in order and a block spans thousands of consecutive
+  // ones, so a single entry should already hit nearly always.
   auto ms = [](auto from, auto to) {
     return std::chrono::duration<double, std::milli>(to - from).count();
   };
+  std::vector<std::pair<size_t, double>> withCache;
+  for (size_t capacity : {size_t{0}, size_t{1}, size_t{4}}) {
+    setRuntimeParameter<&RuntimeParameters::lazyIndexScanBlockCacheSize_>(
+        capacity);
+    auto cacheStart = std::chrono::steady_clock::now();
+    for (Id subject : subjects) {
+      qlever::ScanCursor cursor{index.getImpl(), OptId{subject}, OptId{},
+                                OptId{},         locatedTriples, {}};
+      if (cursor.hasNext()) {
+        sink += cursor.getId(qlever::ScanCursor::Component::Object).getBits();
+      }
+    }
+    withCache.emplace_back(
+        capacity, ms(cacheStart, std::chrono::steady_clock::now()) / numCursors);
+  }
+  setRuntimeParameter<&RuntimeParameters::lazyIndexScanBlockCacheSize_>(0);
   std::cout << "\n== " << numCursors << " cursors on " << basename << "\n"
             << "   construction only    " << ms(start, created) << " ms, "
             << ms(start, created) / numCursors << " ms each\n"
@@ -196,6 +216,10 @@ TEST(ScanCursor, timeCursorCreationAgainstARealIndex) {
             << ms(sameDone, oneScanDone) << " ms, "
             << ms(sameDone, oneScanDone) / numCursors << " ms each\n"
             << "   checksum " << sink << "\n";
+  for (const auto& [capacity, each] : withCache) {
+    std::cout << "   block cache " << capacity << "        " << each
+              << " ms each\n";
+  }
 }
 
 TEST(ScanCursor, enumeratesAllMatchesAndCountsThem) {

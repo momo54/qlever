@@ -65,6 +65,16 @@ struct RuntimeParameters {
   // processes the blocks in bursts.
   SizeT lazyIndexScanNumBlocksInFlight_{20,
                                         "lazy-index-scan-num-blocks-in-flight"};
+  // How many decompressed blocks a thread keeps, so that consecutive scans
+  // landing in the same block decompress it once rather than once each. Zero,
+  // the default, keeps no block: an engine that merge-joins never returns to
+  // one, so every lookup would be a miss and the cache pure overhead. An engine
+  // that drives the joins itself does the opposite — a nested-loop join opens a
+  // scan per outer solution, and a block spans thousands of consecutive
+  // subjects — and wants a handful, one per scan position live at once, which
+  // is the join depth times the parallelism. A block holds 250 kB per column,
+  // so the memory is that times this value times the number of threads.
+  SizeT lazyIndexScanBlockCacheSize_{0, "lazy-index-scan-block-cache-size"};
   // The number of blocks that are read and decompressed ahead of the consumer
   // when scanning permutations during a runtime index rebuild (see
   // `IndexRebuilder`), both for the main scan of the old permutations and for

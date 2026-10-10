@@ -181,6 +181,51 @@ bool CompressedRelationReader::FilterDuplicatesAndGraphs::numRowsIsExact(
 }
 
 namespace {
+// A few decompressed blocks, kept per thread. Per thread so that no lock is
+// taken on a path a merge join walks constantly and never hits; and holding
+// only blocks whose postprocessing is a no-op, which makes a block's contents a
+// pure function of its index and the columns read. That is what makes this
+// correct without a version: the base index never changes, since updates live
+// in the located triples, and a block that has any is not cached.
+struct CachedBlock {
+  size_t blockIndex_;
+  std::vector<ColumnIndex> columns_;
+  DecompressedBlock block_;
+};
+
+thread_local std::vector<CachedBlock> blockCache;
+
+// The cached block for `blockIndex` and `columns`, or `nullptr`. A hit is moved
+// to the front, so that a cache of a few entries keeps the ones in use.
+const DecompressedBlock* findCachedBlock(
+    size_t blockIndex, const std::vector<ColumnIndex>& columns) {
+  auto it = ql::ranges::find_if(blockCache, [&](const CachedBlock& entry) {
+    return entry.blockIndex_ == blockIndex && entry.columns_ == columns;
+  });
+  if (it == blockCache.end()) {
+    return nullptr;
+  }
+  std::rotate(blockCache.begin(), it, it + 1);
+  return &blockCache.front().block_;
+}
+
+// Take `block` into the cache and return a reference to it there, dropping the
+// least recently used entries beyond `capacity`.
+const DecompressedBlock& addCachedBlock(size_t blockIndex,
+                                        std::vector<ColumnIndex> columns,
+                                        DecompressedBlock block,
+                                        size_t capacity) {
+  blockCache.insert(
+      blockCache.begin(),
+      CachedBlock{blockIndex, std::move(columns), std::move(block)});
+  if (blockCache.size() > capacity) {
+    blockCache.erase(blockCache.begin() + capacity, blockCache.end());
+  }
+  return blockCache.front().block_;
+}
+}  // namespace
+
+namespace {
 // Return the index of the first block that an `OFFSET` does not consume
 // entirely, and reduce `limitOffset`'s offset by the rows of the blocks before
 // it. Those blocks are then never read: without this, an `OFFSET` of n costs
@@ -423,7 +468,7 @@ DecompressedBlock CompressedRelationReader::readPossiblyIncompleteBlock(
 
   // Helper lambda that returns the decompressed block or an empty block if
   // `readAndDecompressBlock` returns `std::nullopt`.
-  DecompressedBlock block = [&]() {
+  auto readBlock = [&]() {
     auto result = readAndDecompressBlock(blockMetadata, config);
     if (scanMetadata.has_value()) {
       scanMetadata.value().get().update(result);
@@ -433,7 +478,32 @@ DecompressedBlock CompressedRelationReader::readPossiblyIncompleteBlock(
     } else {
       return DecompressedBlock{config.scanColumns_.size(), allocator_};
     }
-  }();
+  };
+
+  // Only the rows matching the `scanSpec` are wanted, which for a bound
+  // subject is a handful out of tens of thousands, and the block below is only
+  // read. So a cached one is borrowed rather than copied: an `IdTable` cannot
+  // be copied implicitly, and cloning one would spend much of what the cache
+  // saves. See `lazy-index-scan-block-cache-size`.
+  const size_t cacheCapacity =
+      getRuntimeParameter<&RuntimeParameters::lazyIndexScanBlockCacheSize_>();
+  const bool cacheable =
+      cacheCapacity > 0 && locatedTriples.isEmpty() &&
+      config.graphFilter_.numRowsIsExact(blockMetadata);
+
+  DecompressedBlock owned{0, allocator_};
+  const DecompressedBlock* cached =
+      cacheable ? findCachedBlock(blockMetadata.blockIndex_,
+                                  config.scanColumns_)
+                : nullptr;
+  if (cached == nullptr) {
+    owned = readBlock();
+    cached = cacheable ? &addCachedBlock(blockMetadata.blockIndex_,
+                                         config.scanColumns_, std::move(owned),
+                                         cacheCapacity)
+                       : &owned;
+  }
+  const DecompressedBlock& block = *cached;
 
   // We now compute the range of the block according to the `scanSpec`. We
   // start with the full range of the block.

@@ -108,6 +108,35 @@ Java_fr_gdd_passage_qlever_QLeverNative_setBlocksInFlight(JNIEnv* env, jclass,
       0);
 }
 
+// How many decompressed blocks a thread keeps, as the runtime parameter
+// `lazy-index-scan-block-cache-size`. Zero, the default, keeps none. An engine
+// that drives the joins itself wants a handful: a block spans thousands of
+// consecutive subjects, so consecutive scans land in the same one.
+JNIEXPORT void JNICALL
+Java_fr_gdd_passage_qlever_QLeverNative_setBlockCacheSize(JNIEnv* env, jclass,
+                                                          jlong blocks) {
+  guarded(
+      env,
+      [&]() -> jint {
+        setRuntimeParameter<&RuntimeParameters::lazyIndexScanBlockCacheSize_>(
+            static_cast<size_t>(blocks));
+        return 0;
+      },
+      0);
+}
+
+JNIEXPORT jlong JNICALL
+Java_fr_gdd_passage_qlever_QLeverNative_getBlockCacheSize(JNIEnv* env, jclass) {
+  return guarded(
+      env,
+      [&]() -> jlong {
+        return static_cast<jlong>(
+            getRuntimeParameter<
+                &RuntimeParameters::lazyIndexScanBlockCacheSize_>());
+      },
+      0);
+}
+
 JNIEXPORT jlong JNICALL
 Java_fr_gdd_passage_qlever_QLeverNative_getBlocksInFlight(JNIEnv* env, jclass) {
   return guarded(
