@@ -31,6 +31,10 @@ in `~/.m2`. NOTE: `0.2.0` is the version carried by the project's `master`, not
 a released one, so it moves; the backend here was written and verified against
 commit `8d38952`.
 
+On macOS the `cmake` line below needs the flags from
+[`PASSAGE-README.md`](../../../../PASSAGE-README.md#1-build), which also lists
+what a Homebrew `abseil` and a recent Apple Clang break.
+
 ```bash
 # The native library, from the root of the QLever checkout.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

@@ -41,11 +41,11 @@ return graphFilter_.areAllGraphsAllowed() &&
        !blockMetadata.containsDuplicatesWithDifferentGraphs_;
 ```
 
-`firstBlockAfterOffset` walks that same metadata in RAM and returns the index of
-the first block that the `OFFSET` does not consume entirely, subtracting the
-rows of the blocks before it from the offset. `CompressedRelationReader::lazyScan`
-calls it once and has its generator start at that block, so the skipped ones are
-never read:
+`firstBlockAfterOffset` walks that same metadata in RAM and returns the index
+of the first block that the `OFFSET` does not consume entirely, subtracting the
+rows of the blocks before it from the offset.
+`CompressedRelationReader::lazyScan` calls it once and has its generator start
+at that block, so the skipped ones are never read:
 
 ```cpp
 size_t firstBlock = 0;
@@ -130,24 +130,75 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target qlever-index qlever-server CompressedRelationsTest -j $(nproc)
 ```
 
-On macOS, follow `.github/workflows/macos-appleclang-native.yml`, which is the
-authoritative recipe:
+On macOS, `.github/workflows/macos-appleclang-native.yml` is the authoritative
+recipe:
 
 ```bash
 brew install boost icu4c openssl@3 zstd jemalloc pkg-config
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+      -DLOGLEVEL=INFO \
       -DUSE_PARALLEL=false \
+      -D_NO_TIMING_TESTS=ON \
       -DCOMPILER_SUPPORTS_MARCH_NATIVE=FALSE \
       -DICU_ROOT=$(brew --prefix icu4c) \
-      -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST \
-      -D_NO_TIMING_TESTS=ON
+      -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
+      -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST
 ```
 
-With a very recent Apple Clang, the vendored `range-v3` fails to compile
-against libc++ (`meta.hpp`: `redefinition of 'allocator' as different kind of
-symbol`). Adding `-DCMAKE_CXX_FLAGS=-DMETA_NO_STD_FORWARD_DECLARATIONS` works
-around it; `range-v3` provides that guard for exactly this case.
+#### What breaks on macOS and why
+
+That recipe is necessary but not sufficient on a developer machine, because the
+CI runner has nothing installed besides the six formulae above. Both failures
+below were hit while rebasing this branch onto upstream in October 2026, with
+Apple Clang 21 and Homebrew.
+
+**A Homebrew `abseil` shadows the one QLever pins.** On macOS,
+`CMakeLists.txt` puts the Homebrew prefix on the *global* include path:
+
+```cmake
+link_directories(${HOMEBREW_PREFIX}/lib)
+include_directories(${HOMEBREW_PREFIX}/include)
+```
+
+QLever fetches abseil itself, pinned to `20260107.1`. A Homebrew `abseil` is
+newer (`20260817.0` at the time of writing), and because that
+`include_directories` comes first, its headers are the ones that get included
+while the pinned library is the one that gets linked. Unlinking it is enough,
+and is reversible:
+
+```bash
+brew unlink abseil        # `brew link abseil` restores it
+```
+
+The macOS CI never installs abseil, which is why this is invisible there. The
+same reasoning applies to any dependency that QLever pins *and* Homebrew
+provides, so a build that fails in a fetched dependency is worth checking
+against `brew list` before anything else.
+
+**`range-v3` does not compile against a very recent libc++.** QLever fetches
+`range-v3` from the `joka921/range-v3` fork; with Apple Clang 21, its
+`meta.hpp` fails with `redefinition of 'allocator' as a different kind of
+symbol`. `range-v3` ships a guard for exactly this case:
+
+```bash
+-DCMAKE_CXX_FLAGS=-DMETA_NO_STD_FORWARD_DECLARATIONS
+```
+
+NOTE: a `cmake` configure that succeeds says nothing about either problem. Both
+are compile-time failures in a dependency's headers, so they only appear once a
+translation unit that includes them is actually compiled.
+
+One thing that looks like an error and is not: the link step prints a long
+series of `ld: warning: building for macOS-11.0, but linking with dylib ...
+built for newer version`, because `CMAKE_OSX_DEPLOYMENT_TARGET=11.0` is much
+older than the target of the current Homebrew dylibs. Those are warnings only.
+
+One that was a real error, and is now fixed upstream: between January and
+October 2026, the `re2` `FetchContent_Declare` combined `GIT_SHALLOW TRUE` with
+a commit that was no longer a branch tip, so configuring failed while checking
+`re2` out. Upstream `43b1b086` (PR #3603) replaced the shallow clone with a
+full one, so an older checkout of this fork only needs rebasing onto upstream.
 
 ### 2. Create the data
 
@@ -246,6 +297,12 @@ with no fixed column and for one with `col0` and `col1` fixed.
 ```bash
 ./build/test/CompressedRelationsTest --gtest_filter='*largeOffset*'
 ```
+
+NOTE: run the test binaries from a scratch directory rather than from the root
+of the checkout. They write index files named after the test into the current
+working directory, and `.gitignore` only covers `/_staticGlobalTestIndex*`, so
+running the whole suite in the checkout leaves a couple of hundred untracked
+files behind.
 
 Both tests fail against the unpatched code, and fail only on the block-skipping
 assertions — the correctness assertions pass in both versions, as they must,

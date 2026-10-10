@@ -133,8 +133,10 @@ QLever build is unaffected. Set `JAVA_HOME` if they are somewhere unusual. The
 result is `build/lib/libqleverjni.{so,dylib}`.
 
 On macOS, follow `.github/workflows/macos-appleclang-native.yml`; see
-[PASSAGE-README.md](PASSAGE-README.md#1-build) for the flags, including the
-`range-v3` workaround needed with a recent Apple Clang.
+[PASSAGE-README.md](PASSAGE-README.md#1-build) for the flags, and
+[what breaks on macOS and why](PASSAGE-README.md#what-breaks-on-macos-and-why)
+for the two failures that recipe does not cover — a Homebrew `abseil` shadowing
+the pinned one, and `range-v3` against a recent Apple Clang.
 
 ### The Java side
 
