@@ -309,13 +309,29 @@ right trade for the sequential throughput it wants.
 1,418,439 — fifty-eight times.
 
 Two methodological notes, because both cost a wrong conclusion before being
-noticed. Blazegraph's scans are Java and compile as they run, so it reports
-around 800,000 solutions/s cold and 2,800,000 warm, while QLever's native
-scans gain a few percent: a benchmark without warm-up flatters QLever, and an
-earlier version of this section claimed it ahead on the join on that basis.
-And smaller blocks are worth sixteenfold *without* the cache and
+noticed.
+
+"Warm" is two things and treating them as one hid a bad protocol. The JVM
+compiles the pipeline as it runs, and a store's working set stays in memory
+once touched, so after a few runs both are joining in memory. The run-by-run
+rates show the climb: Blazegraph goes 471,698 then 2,222,222 then 2,469,135
+before levelling at 2,816,901, QLever 405,679 then 1,226,993 before levelling
+at 1,418,439. Blazegraph needs four runs where QLever needs two, so discarding
+one under-reports it, and whichever store runs second starts on an
+already-compiled JVM — measured first Blazegraph opens at 268,456 and QLever at
+405,679. The plateau does not depend on the order; the first run entirely does.
+Three runs are discarded now, and an earlier version of this section, which
+discarded none, claimed QLever ahead on the join on that basis.
+
+And smaller blocks are worth sixteenfold *without* the block cache and
 counterproductive with it, since one decompressed block then serves thousands
 of lookups — so `build-index.sh` uses QLever's default size.
+
+A third observation, unexplained: over twelve runs of the join the process
+grows by about 840 MB with QLever and about 206 MB with Blazegraph, so the
+disk ratio reverses in memory. QLever's resident footprint exceeds its entire
+283 MB index, which its vocabulary and the structures it expands at load would
+account for, but that is a guess and not a measurement.
 
 Against the bar this backend was built to clear — replacing an unmaintained
 dependency at comparable cost — a factor of two on joins against a sixfold
