@@ -232,14 +232,18 @@ full one, so an older checkout of this fork only needs rebasing onto upstream.
 
 ### 2. Create the data
 
-Two million triples sharing a single predicate, so that one relation spans many
-blocks. With the default block size of 250 KB per column, a block holds 31 250
-rows, giving 64 blocks.
+Twenty million triples sharing a single predicate, so that one relation spans
+many blocks. With the default block size of 250 KB per column a block holds
+31 250 rows, giving 640 blocks. That number is what the measurement is about:
+at 64 blocks the effect is nearly hidden by the concurrency of the scan itself,
+as the second row of the table in step 6 shows.
 
 ```bash
 mkdir -p /tmp/qlever-demo && cd /tmp/qlever-demo
-awk 'BEGIN{for(i=0;i<2000000;i++) printf "<http://ex.org/s%d> <http://ex.org/p1> <http://ex.org/o%d> .\n", i, i%1000}' > data.ttl
+awk 'BEGIN{for(i=0;i<20000000;i++) printf "<http://ex.org/s%d> <http://ex.org/p1> <http://ex.org/o%d> .\n", i, i%1000}' > data.ttl
 ```
+
+This writes 1.3 GB and takes about 13 s; the index below adds 1.8 GB.
 
 ### 3. Build the index
 
@@ -247,10 +251,10 @@ awk 'BEGIN{for(i=0;i<2000000;i++) printf "<http://ex.org/s%d> <http://ex.org/p1>
 /path/to/build/qlever-index -i testidx -f data.ttl -F ttl -p true
 ```
 
-The log confirms the geometry the measurement relies on:
+About 20 s. The log confirms the geometry the measurement relies on:
 
 ```
-Statistics for PSO: #relations = 1, #blocks = 64, #triples = 2,000,000
+Statistics for PSO: #relations = 1, #blocks = 640, #triples = 20,000,000
 ```
 
 ### 4. Start the server
@@ -263,9 +267,15 @@ Statistics for PSO: #relations = 1, #blocks = 64, #triples = 2,000,000
 
 ```bash
 curl -s -X POST --data-urlencode \
-  "query=SELECT * WHERE { ?s <http://ex.org/p1> ?o } LIMIT 3 OFFSET 1999990" \
+  "query=SELECT * WHERE { ?s <http://ex.org/p1> ?o } LIMIT 3 OFFSET 19999990" \
   http://localhost:7021/
 ```
+
+The rows come back as `s9999990`, `s9999991`, `s9999992` rather than
+`s19999990`: a scan walks the permutation in `Id` order, which is the
+collation order of the vocabulary strings, and `s9999990` sorts near the end
+among `s1`, `s10`, `s100`, ... That is the deterministic-but-arbitrary order
+this patch preserves, not a defect.
 
 ### 6. Measure
 
@@ -284,8 +294,8 @@ bench() {  # $1 = port, $2 = base offset
   echo "$(date +%s.%N) - $start" | bc
 }
 
-bench 7021 0          # near the start of the relation
-bench 7021 1999900    # near its end
+bench 7021 0           # near the start of the relation
+bench 7021 19999900    # near its end
 ```
 
 To measure the behaviour without the skipping on the same binary, the same
@@ -295,31 +305,44 @@ separate builds instead invites differences that have nothing to do with the
 `OFFSET`.
 
 Median of three batches of 20 requests, each preceded by a discarded warm-up
-batch; 2 M triples, 64 blocks, Apple M-series, measured on 2026-10-10 against
-the tree rebased onto upstream:
+batch; Apple M-series, 16 GB, measured on 2026-10-10 against the tree rebased
+onto upstream:
 
 ```
-without the block skipping   OFFSET ~0   0.320 s   OFFSET ~1.999M   0.382 s   (+19 %)
-with it                      OFFSET ~0   0.322 s   OFFSET ~1.999M   0.297 s   (flat)
+20 M triples, 640 blocks
+  without the block skipping   OFFSET ~0   0.320 s   OFFSET ~19.9999M   0.970 s   (x3.0)
+  with it                      OFFSET ~0   0.327 s   OFFSET ~19.9999M   0.331 s   (flat)
+
+2 M triples, 64 blocks
+  without the block skipping   OFFSET ~0   0.320 s   OFFSET  ~1.9999M   0.382 s   (+19 %)
+  with it                      OFFSET ~0   0.322 s   OFFSET  ~1.9999M   0.297 s   (flat)
 ```
 
-The offset therefore costs about 3.1 ms per query without the skipping — the
-residual cost of decompressing the 64 blocks that are then discarded — and
-nothing with it. Both configurations return identical rows, which is worth
+Both configurations were checked to return identical rows, which is worth
 asserting next to the timing rather than assuming.
 
-That penalty is much smaller than a sequential scan of the discarded blocks
-would suggest, because `lazyScan` reads up to 21 blocks concurrently
-(`lazy-index-scan-num-blocks-in-flight`, default 20), so 64 discarded blocks
-cost roughly three rounds rather than 64. The absolute gain at this size is
-correspondingly small, and the measurement's point is the shape of the curve:
-growing with the offset before, flat after. On a relation of 100 M triples
-(about 3 200 blocks) that concurrency can no longer hide the cost, since it
-bounds how many blocks are in flight, not how many are read.
+The two sizes together are the actual result, because they show the cost is
+linear in the number of blocks the `OFFSET` passes over:
 
-NOTE: an earlier version of this section reported +53 % and 9.4 ms per query.
-Those figures were taken before this branch was rebased onto upstream, from two
-separate builds, and they do not reproduce: the numbers above supersede them.
+| triples | blocks | cost per query | per block |
+|---|---|---|---|
+| 2 M | 64 | 3.1 ms | 0.048 ms |
+| 20 M | 640 | 32.5 ms | 0.051 ms |
+
+Ten times the blocks, ten times the cost, and the per-block figure is stable —
+that is the `O(offset)` the patch removes, and with the skipping both sizes are
+flat instead.
+
+At 64 blocks the effect is easy to miss, because `lazyScan` reads up to 21
+blocks concurrently (`lazy-index-scan-num-blocks-in-flight`, default 20): 64
+discarded blocks cost about three rounds, which is nearly lost in the ~16 ms a
+request spends elsewhere. That parameter bounds how many blocks are in flight,
+not how many are read, so the masking does not survive scale: at 640 blocks the
+same query is three times slower end to end.
+
+NOTE: an earlier version of this section reported +53 % and 9.4 ms per query at
+2 M triples. Those figures were taken before this branch was rebased onto
+upstream, from two separate builds, and they do not reproduce.
 
 ## Tests
 
