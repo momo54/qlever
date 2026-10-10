@@ -288,21 +288,38 @@ bench 7021 0          # near the start of the relation
 bench 7021 1999900    # near its end
 ```
 
-Measured on 2 M triples, 20 requests per batch:
+To measure the behaviour without the skipping on the same binary, the same
+index and the same server flags, make `firstBlockAfterOffset` return `0` before
+it inspects anything, and run a second server from that build. Comparing two
+separate builds instead invites differences that have nothing to do with the
+`OFFSET`.
+
+Median of three batches of 20 requests, each preceded by a discarded warm-up
+batch; 2 M triples, 64 blocks, Apple M-series, measured on 2026-10-10 against
+the tree rebased onto upstream:
 
 ```
-without the patch    OFFSET ~0   0.355 s     OFFSET ~1.999M   0.542 s   (+53 %)
-with the patch       OFFSET ~0   0.324 s     OFFSET ~1.999M   0.301 s   (flat)
+without the block skipping   OFFSET ~0   0.320 s   OFFSET ~1.999M   0.382 s   (+19 %)
+with it                      OFFSET ~0   0.322 s   OFFSET ~1.999M   0.297 s   (flat)
 ```
 
-Without the patch the offset costs about 9.4 ms per query — the cost of
-decompressing the 64 blocks that are then discarded. With the patch that cost
-disappears into the noise. Both versions return identical results.
+The offset therefore costs about 3.1 ms per query without the skipping — the
+residual cost of decompressing the 64 blocks that are then discarded — and
+nothing with it. Both configurations return identical rows, which is worth
+asserting next to the timing rather than assuming.
 
-The absolute gain is small here because 64 blocks is not much. What the
-measurement establishes is the shape of the curve: linear in the offset before,
-flat after. On a relation of 100 M triples (about 3 200 blocks) the same
-mechanism removes two orders of magnitude of work instead of one.
+That penalty is much smaller than a sequential scan of the discarded blocks
+would suggest, because `lazyScan` reads up to 21 blocks concurrently
+(`lazy-index-scan-num-blocks-in-flight`, default 20), so 64 discarded blocks
+cost roughly three rounds rather than 64. The absolute gain at this size is
+correspondingly small, and the measurement's point is the shape of the curve:
+growing with the offset before, flat after. On a relation of 100 M triples
+(about 3 200 blocks) that concurrency can no longer hide the cost, since it
+bounds how many blocks are in flight, not how many are read.
+
+NOTE: an earlier version of this section reported +53 % and 9.4 ms per query.
+Those figures were taken before this branch was rebased onto upstream, from two
+separate builds, and they do not reproduce: the numbers above supersede them.
 
 ## Tests
 
