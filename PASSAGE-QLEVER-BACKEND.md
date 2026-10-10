@@ -317,11 +317,35 @@ decompress that same megabyte four hundred times, because QLever caches query
 results and vocabulary lookups but not decompressed blocks.
 
 Which is the same design choice again, not an oversight: a merge join never
-returns to a block, so keeping one would be dead weight. For a nested-loop
-join it is the whole cost. A single-entry cache of the last decompressed block
-would collapse those four hundred decompressions into one, which is an order of
-magnitude beyond what the block size buys — and it belongs in
-`CompressedRelationReader`, where this fork already patches the `OFFSET` path.
+returns to a block, so keeping one would be dead weight.
+
+For a nested-loop join it is the whole cost, and the headroom is two orders of
+magnitude rather than one. Asking for the *same* subject two thousand times
+still costs 0.928 ms each, so that one block is decompressed two thousand
+times; reading two thousand rows through a single scan costs 0.0020 ms each.
+
+| 2,000 lookups, default blocks | ms each |
+|---|---|
+| subjects in index order | 0.948 |
+| subjects shuffled | 0.925 |
+| the same subject every time | 0.928 |
+| 2,000 rows through one scan | **0.0020** |
+
+So a cache of a few decompressed blocks is worth about 460x on this access
+pattern, against the 19x the block size buys. A few entries suffice, one per
+scan position that is live at once, which is the join depth times the
+parallelism; a block is 250 kB per column, so the whole cache is a few
+megabytes. It belongs in `CompressedRelationReader`, where this fork already
+patches the `OFFSET` path.
+
+Three things make it a change to design rather than to write. It has to be
+keyed on the delta-triples version as well as the block, or an update would be
+invisible to it — `LocatedTriplesState` already carries a counter for that. It
+has to not take a lock on a path that merge joins walk constantly, since for
+them every lookup is a miss. And for the same reason it has to be off by
+default, which makes its natural shape a runtime parameter that an engine with
+a different access pattern turns on, rather than a new behaviour imposed on
+QLever's own.
 
 What is left runs both ways rather than one. On the join QLever stays 1.9x
 behind at 1,000 rows and 1.3x at 100; on a scan with the predicate bound it is

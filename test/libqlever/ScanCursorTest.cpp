@@ -152,6 +152,32 @@ TEST(ScanCursor, timeCursorCreationAgainstARealIndex) {
   }
   auto shuffledDone = std::chrono::steady_clock::now();
 
+  // The same subject every time, so every lookup wants the one block. With a
+  // cache of decompressed blocks this would cost one decompression; without
+  // one it costs as many as there are lookups, which is what this shows.
+  for (size_t i = 0; i < numCursors; ++i) {
+    qlever::ScanCursor cursor{index.getImpl(), OptId{subjects.front()},
+                              OptId{},         OptId{}, locatedTriples, {}};
+    if (cursor.hasNext()) {
+      sink += cursor.getId(qlever::ScanCursor::Component::Object).getBits();
+    }
+  }
+  auto sameDone = std::chrono::steady_clock::now();
+
+  // For scale: the same number of rows read through a single scan, which
+  // decompresses each block once. This is the floor a cache could reach.
+  size_t rows = 0;
+  {
+    qlever::ScanCursor cursor{index.getImpl(), OptId{}, OptId{}, OptId{},
+                              locatedTriples, {}};
+    while (cursor.hasNext() && rows < numCursors) {
+      sink += cursor.getId(qlever::ScanCursor::Component::Object).getBits();
+      cursor.next();
+      ++rows;
+    }
+  }
+  auto oneScanDone = std::chrono::steady_clock::now();
+
   auto ms = [](auto from, auto to) {
     return std::chrono::duration<double, std::milli>(to - from).count();
   };
@@ -163,6 +189,12 @@ TEST(ScanCursor, timeCursorCreationAgainstARealIndex) {
             << " read)\n"
             << "   first read, shuffled " << ms(done, shuffledDone) << " ms, "
             << ms(done, shuffledDone) / numCursors << " ms each\n"
+            << "   same subject each    " << ms(shuffledDone, sameDone)
+            << " ms, " << ms(shuffledDone, sameDone) / numCursors
+            << " ms each\n"
+            << "   " << rows << " rows, one scan   "
+            << ms(sameDone, oneScanDone) << " ms, "
+            << ms(sameDone, oneScanDone) / numCursors << " ms each\n"
             << "   checksum " << sink << "\n";
 }
 
