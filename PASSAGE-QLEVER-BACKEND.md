@@ -271,13 +271,46 @@ The programs behind these numbers are in
 [`src/libqlever/jni/java/demo`](src/libqlever/jni/java/demo), with a
 [README](src/libqlever/jni/java/README.md) saying which index each expects.
 
+## Against Blazegraph, and the block size that decides it
+
+Measured on WatDiv 10M — 10,916,457 triples, the same data on both sides — with
+the two stores driving the same engine, by `QLeverVsBlazegraphTest` in the
+Passage fork. They answer identically; what differs is what they cost, and the
+answer turned on a setting rather than on either design.
+
+The query is `SELECT * WHERE { ?s a ?c . ?s ?p ?o }`, a nested-loop join, so
+its inner pattern is scanned afresh for every outer solution. With QLever's
+default index that is ruinous and with a smaller block size it is not:
+
+| rows per block | opening a scan | the join | `?s ?p ?o` | index |
+|---|---|---|---|---|
+| 31,250 (QLever's default) | 0.915 ms | 24,000 /s | 628,930 /s | 283 MB |
+| 1,000 | **0.048 ms** | 385,356 /s | 651,465 /s | 297 MB |
+| 100 | 0.016 ms | 613,496 /s | 576,368 /s | 610 MB |
+| Blazegraph | 0.072 ms | 743,494 /s | 692,041 /s | 1.7 GB |
+
+The cost is decompressing the first block, which a block-compressed column
+store pays whole however few rows are wanted. It is not the index size (0.853 ms
+over a million triples, 0.861 over eleven million), not the prefetch depth
+(0.856 to 0.860 ms as `lazy-index-scan-num-blocks-in-flight` goes from 20 to 1),
+and not the JNI boundary (0.0004 ms to construct a cursor in C++, 0.933 for its
+first read). A block holds 250 kB per column, so one triple can cost a megabyte
+of Zstd, which is the millisecond measured.
+
+So the default is tuned for QLever's own engine, which scans many rows at a
+time, and Passage does the opposite. At 1,000 rows per block the join is
+sixteen times faster for five percent more disk, long scans are unchanged, and
+opening a scan already costs less than Blazegraph does. `build-index.sh` in the
+Passage module builds indexes that way; the figures above are what it is for.
+
+What is left runs both ways rather than one. On the join QLever stays 1.9x
+behind at 1,000 rows and 1.3x at 100; on a scan with the predicate bound it is
+twice as fast; and it holds the same data in 297 MB against 1.7 GB. Against the
+bar this backend was built to clear — replacing an unmaintained dependency at
+comparable cost — that is cleared, provided the index is built for it.
+
 Not verified, in decreasing order of how much it matters:
 
-* **Throughput.** Nothing here measures how this backend compares to the
-  Blazegraph one on a real workload (WDBench), nor what the JNI boundary
-  actually costs. Note what the bar is: the point of this backend is to replace
-  an unmaintained dependency, so comparable performance suffices and only a
-  large regression would be a problem.
 * **Scale.** The Passage run uses six triples; it exercises correctness, not
   the offset skipping.
 * **Coverage.** Only basic graph patterns were driven end to end. `OPTIONAL`,
