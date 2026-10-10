@@ -1,0 +1,14 @@
+diff --git a/src/index/CompressedRelationReader.cpp b/src/index/CompressedRelationReader.cpp
+index c0b56139..8c89c979 100644
+--- a/src/index/CompressedRelationReader.cpp
++++ b/src/index/CompressedRelationReader.cpp
+@@ -209,6 +209,9 @@ size_t firstBlockAfterOffset(
+     const CompressedRelationReader::FilterDuplicatesAndGraphs& graphFilter,
+     const LocatedTriplesPerBlock& locatedTriplesPerBlock,
+     LimitOffsetClause& limitOffset) {
++  // Neutralised by `passage-offset-bench.sh` to measure the behaviour before
++  // the patch. Not meant to be committed in this state.
++  return 0;
+   uint64_t& offset = limitOffset._offset;
+   auto blockIsSkippable = [&](const CompressedBlockMetadata& block) {
+     return graphFilter.numRowsIsExact(block) &&

@@ -279,6 +279,27 @@ this patch preserves, not a defect.
 
 ### 6. Measure
 
+Steps 1 to 6 are also a script, which is the only way to run the comparison
+without editing C++ by hand:
+
+```bash
+./passage-offset-bench.sh              # 20 M triples
+./passage-offset-bench.sh 2000000      # the smaller size
+```
+
+It builds both binaries, generates the data and the index when they are not
+already there, times the queries with the skipping, then applies
+`passage-no-offset-skip.patch`, rebuilds `qlever-server`, times them again, and
+reverts. The patch is reverted and the binary rebuilt on every exit path,
+Ctrl-C included; the script refuses to start while `src/` has uncommitted
+changes, so a failed revert cannot be mistaken for your own work; and it
+compares the rows returned by the two configurations, failing if they differ.
+Run on 2026-10-10 it reproduced the 20 M figure below at 32.4 ms per query
+against 32.5 ms.
+
+The rest of this section is what the script does, for when you would rather do
+it by hand.
+
 `LIMIT`/`OFFSET` is part of the cache key, so vary the offset across iterations
 to keep every request a cache miss. Compare a batch near the start of the
 relation with a batch near its end.
@@ -339,6 +360,13 @@ discarded blocks cost about three rounds, which is nearly lost in the ~16 ms a
 request spends elsewhere. That parameter bounds how many blocks are in flight,
 not how many are read, so the masking does not survive scale: at 640 blocks the
 same query is three times slower end to end.
+
+In the `with it` rows a deep offset sometimes measures a hair *faster* than
+`OFFSET ~0`, so the script can print a small negative cost there. The likely
+reason, which this measurement does not isolate, is that at `OFFSET ~0` the
+scan reads ahead into blocks the `LIMIT` then discards, whereas with the
+skipping a deep offset starts at the last block and has nothing left to read
+ahead into.
 
 NOTE: an earlier version of this section reported +53 % and 9.4 ms per query at
 2 M triples. Those figures were taken before this branch was rebased onto
