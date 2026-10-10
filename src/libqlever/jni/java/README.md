@@ -22,19 +22,41 @@ repository** — there is nothing under the `fr.gdd` group on Maven Central — 
 they have to be built from source and installed into the local repository:
 
 ```bash
+export JAVA_HOME=$(brew --prefix openjdk@21)   # or wherever a 21 lives
 git clone https://github.com/passage-org/passage.git
-cd passage && mvn -pl passage-volcano -am install -DskipTests
+cd passage
+git checkout 8d38952      # what this backend was written against
+mvn -pl passage-volcano -am install -DskipTests
 ```
 
 That produces `fr.gdd:passage-commons:0.2.0` and `fr.gdd:passage-volcano:0.2.0`
-in `~/.m2`. NOTE: `0.2.0` is the version carried by the project's `master`, not
-a released one, so it moves; the backend here was written and verified against
-commit `8d38952`.
+in `~/.m2`, along with `jena-utils`, `raw` and `passage-blazegraph`.
 
-Those jars are compiled for **Java 21** (class file version 65). Building
-against a 17 fails with `class file has wrong version 65.0, should be 61.0`,
-which is easy to hit when a version manager pins an older default, so point at
-a 21 explicitly.
+`JAVA_HOME` is load-bearing. Passage targets release 21, so a Maven running
+under a 17 — which a version manager pinned to an older default gives you —
+stops at the first module with `Failed to execute goal
+...maven-compiler-plugin:compile on project jena-utils: error: release version
+21 not supported`. Setting `javac` for the classes below is not enough; this is
+Maven's own JDK.
+
+The checkout is not optional caution. `0.2.0` is the version `master` carries
+rather than a release, so it moves, and the jar records nothing about where it
+came from — its manifest holds only `Created-By` and `Java-Version`. So an
+existing `0.2.0` in `~/.m2` cannot be checked against a commit, and installing
+from `master` later overwrites it in place without a word. Two machines can
+therefore disagree on what `0.2.0` means, which is also why the step above has
+to run at least once per machine: nothing in this repository can supply those
+jars, and no `~/.m2` may be assumed to hold them.
+
+The resulting jars are class file version 65, so compiling the classes below
+against a 17 fails in turn, with `class file has wrong version 65.0, should be
+61.0`. Hence the explicit `$JDK` everywhere from here on.
+
+The pin is worth trusting: installing `8d38952` into an empty local repository
+(`mvn ... -Dmaven.repo.local=/tmp/m2`, which leaves `~/.m2` alone) produces
+`passage-commons` and `passage-volcano` whose 77 and 83 class files are
+byte-for-byte identical to an install made from that commit months earlier. So
+while `0.2.0` moves, that commit's `0.2.0` does not.
 
 On macOS the `cmake` line below needs the flags from
 [`PASSAGE-README.md`](../../../../PASSAGE-README.md#1-build), which also lists
@@ -49,10 +71,11 @@ LIB=$PWD/build/lib/libqleverjni.so        # .dylib on macOS
 JDK=$(brew --prefix openjdk@21)/bin       # or wherever a 21 lives
 ```
 
-The classpath is every jar `passage-volcano` pulls in. Once the jars are in
-`~/.m2` the clone above is no longer needed to recover it, which matters
-because the clone is usually gone by the time anyone reruns this. A pom that
-depends on nothing else resolves it:
+The classpath is every jar `passage-volcano` pulls in. The clone above is the
+only thing that can put them in `~/.m2`, but it is not needed again afterwards
+to recompute the classpath, which matters because the clone is usually gone by
+the time anyone reruns this. A pom that depends on nothing else resolves it
+from whatever `~/.m2` already holds:
 
 ```bash
 cat > pom.xml <<'EOF'
