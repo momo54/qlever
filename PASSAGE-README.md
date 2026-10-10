@@ -171,6 +171,21 @@ and is reversible:
 brew unlink abseil        # `brew link abseil` restores it
 ```
 
+It fails loudly rather than silently: each abseil LTS release puts its whole
+API in a versioned inline namespace, so the Homebrew headers emit
+`absl::lts_20260817::...` symbols while the pinned library only defines
+`absl::lts_20260107::...`, and the link step ends with
+
+```
+Undefined symbols for architecture arm64:
+  "absl::lts_20260817::StrCat(absl::lts_20260817::AlphaNum const&, ...)",
+      referenced from: ...
+ld: symbol(s) not found for architecture arm64
+```
+
+Any undefined `absl::lts_<date>` symbol whose date does not match the comment
+next to `abseil`'s `GIT_TAG` in `CMakeLists.txt` is this and nothing else.
+
 The macOS CI never installs abseil, which is why this is invisible there. The
 same reasoning applies to any dependency that QLever pins *and* Homebrew
 provides, so a build that fails in a fetched dependency is worth checking
