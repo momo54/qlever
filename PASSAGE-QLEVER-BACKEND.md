@@ -221,6 +221,14 @@ SELECT * WHERE {
       ?human <http://ex.org/occupation> ?occupation } }
 ```
 
+The commands that run this — the native library, the classpath, which JDK, and
+the index — are in
+[`src/libqlever/jni/java/README.md`](src/libqlever/jni/java/README.md), as
+`PassageOnQlever`. Rerun on 2026-10-10 against the tree rebased onto upstream,
+it still terminates after 6 executions with those 3 solutions and prints the
+query above verbatim. Note that the process then exits 132 rather than 0,
+for a reason unrelated to the evaluation that the same README documents.
+
 ## A convention that is easy to get wrong
 
 `PassageScan` signals an unbound component of a triple pattern with **`null`**,

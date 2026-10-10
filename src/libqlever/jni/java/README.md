@@ -31,6 +31,11 @@ in `~/.m2`. NOTE: `0.2.0` is the version carried by the project's `master`, not
 a released one, so it moves; the backend here was written and verified against
 commit `8d38952`.
 
+Those jars are compiled for **Java 21** (class file version 65). Building
+against a 17 fails with `class file has wrong version 65.0, should be 61.0`,
+which is easy to hit when a version manager pins an older default, so point at
+a 21 explicitly.
+
 On macOS the `cmake` line below needs the flags from
 [`PASSAGE-README.md`](../../../../PASSAGE-README.md#1-build), which also lists
 what a Homebrew `abseil` and a recent Apple Clang break.
@@ -41,15 +46,39 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target qleverjni qlever-index -j $(nproc)
 LIB=$PWD/build/lib/libqleverjni.so        # .dylib on macOS
 
-# The classpath of the Passage jars installed above.
-CP=passage-volcano/target/passage-volcano-0.2.0.jar:passage-commons/target/passage-commons-0.2.0.jar:$(
-    cd passage-volcano && mvn -q dependency:build-classpath \
-        -Dmdep.outputFile=/dev/stdout -DincludeScope=compile)
-
-# The backend and the demos.
-javac -cp "$CP" -d classes fr/gdd/passage/qlever/*.java
-javac -cp "$CP:classes" -d classes demo/*.java
+JDK=$(brew --prefix openjdk@21)/bin       # or wherever a 21 lives
 ```
+
+The classpath is every jar `passage-volcano` pulls in. Once the jars are in
+`~/.m2` the clone above is no longer needed to recover it, which matters
+because the clone is usually gone by the time anyone reruns this. A pom that
+depends on nothing else resolves it:
+
+```bash
+cat > pom.xml <<'EOF'
+<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>
+  <groupId>local</groupId><artifactId>cp</artifactId><version>0</version>
+  <dependencies><dependency><groupId>fr.gdd</groupId>
+    <artifactId>passage-volcano</artifactId><version>0.2.0</version>
+  </dependency></dependencies></project>
+EOF
+mvn -q dependency:build-classpath -Dmdep.outputFile=cp.txt
+CP=$(cat cp.txt)
+```
+
+`mvn -o` is not enough for that: resolving the plugin itself needs the network
+once.
+
+```bash
+$JDK/javac -cp "$CP" -d classes fr/gdd/passage/qlever/*.java
+$JDK/javac -cp "${CP}:classes" -d classes demo/*.java
+```
+
+NOTE: the braces in `"${CP}:classes"` are not decoration. In zsh, which is the
+default shell on macOS, `"$CP:classes"` applies the `:c` history modifier and
+silently yields `...jarlasses`, so the last entry is mangled and the class is
+not found. Bash leaves it alone, which is why this reads as a working command
+and is not one.
 
 `SmokeTest` needs neither Passage jar, only `QLeverNative`.
 
@@ -71,11 +100,29 @@ six triples are listed in
 ## Running them
 
 ```bash
-java -cp classes                SmokeTest       "$LIB" testidx
-java -cp "$CP:classes"          BackendTest     "$LIB" testidx
-java -cp classes                SkipBench       "$LIB" testidx
-java -cp "$CP:classes"          PassageOnQlever "$LIB" fig2
+$JDK/java -cp classes            SmokeTest       "$LIB" testidx
+$JDK/java -cp "${CP}:classes"    BackendTest     "$LIB" testidx
+$JDK/java -cp classes            SkipBench       "$LIB" testidx
+$JDK/java -cp "${CP}:classes"    PassageOnQlever "$LIB" fig2
 ```
+
+NOTE: the JVM dies with a `SIGSEGV` **after** a demo has printed its results
+and its verdict, so the exit status is 132 rather than 0 and cannot be used to
+decide whether a run succeeded. The crash is in jemalloc's per-thread cleanup
+as one of QLever's own worker threads exits:
+
+```
+_pthread_exit -> _pthread_tsd_cleanup -> je_tsd_cleanup
+  -> tcache_destroy -> tcache_flush_cache -> je_arena_ptr_array_flush
+```
+
+`link_libraries()` in the top-level `CMakeLists.txt` is directory-scoped, so
+jemalloc reaches every target created after it, `qleverjni` included, and
+through `qlever`, `engine` and `index` transitively as well — filtering it off
+the one target therefore does not help, and `MALLOC_CONF` is not read. A
+library meant to be loaded into a JVM that already has an allocator should not
+link it at all, which is a change to a line this fork does not own. Until then,
+read the verdict the demo prints and ignore the status.
 
 * **`SmokeTest`** exercises the native methods directly: the vocabulary, a bulk
   read, a deep `skip`, the round trip of an offset through a fresh cursor, and
