@@ -187,17 +187,21 @@ namespace {
 // pure function of its index and the columns read. That is what makes this
 // correct without a version: the base index never changes, since updates live
 // in the located triples, and a block that has any is not cached.
+// The block is kept together with the metadata of having read it, so that a
+// hit can report itself to a `LazyScanMetadata` exactly as a read would — it
+// takes a const reference, so nothing is copied. Without that, a scan would
+// report fewer blocks read than it had blocks, which QLever asserts against.
 struct CachedBlock {
   size_t blockIndex_;
   std::vector<ColumnIndex> columns_;
-  DecompressedBlock block_;
+  DecompressedBlockAndMetadata blockAndMetadata_;
 };
 
 thread_local std::vector<CachedBlock> blockCache;
 
-// The cached block for `blockIndex` and `columns`, or `nullptr`. A hit is moved
+// The cached entry for `blockIndex` and `columns`, or `nullptr`. A hit is moved
 // to the front, so that a cache of a few entries keeps the ones in use.
-const DecompressedBlock* findCachedBlock(
+const DecompressedBlockAndMetadata* findCachedBlock(
     size_t blockIndex, const std::vector<ColumnIndex>& columns) {
   auto it = ql::ranges::find_if(blockCache, [&](const CachedBlock& entry) {
     return entry.blockIndex_ == blockIndex && entry.columns_ == columns;
@@ -206,22 +210,21 @@ const DecompressedBlock* findCachedBlock(
     return nullptr;
   }
   std::rotate(blockCache.begin(), it, it + 1);
-  return &blockCache.front().block_;
+  return &blockCache.front().blockAndMetadata_;
 }
 
-// Take `block` into the cache and return a reference to it there, dropping the
-// least recently used entries beyond `capacity`.
-const DecompressedBlock& addCachedBlock(size_t blockIndex,
-                                        std::vector<ColumnIndex> columns,
-                                        DecompressedBlock block,
-                                        size_t capacity) {
-  blockCache.insert(
-      blockCache.begin(),
-      CachedBlock{blockIndex, std::move(columns), std::move(block)});
+// Take `blockAndMetadata` into the cache and return a reference to it there,
+// dropping the least recently used entries beyond `capacity`.
+const DecompressedBlockAndMetadata& addCachedBlock(
+    size_t blockIndex, std::vector<ColumnIndex> columns,
+    DecompressedBlockAndMetadata blockAndMetadata, size_t capacity) {
+  blockCache.insert(blockCache.begin(),
+                    CachedBlock{blockIndex, std::move(columns),
+                                std::move(blockAndMetadata)});
   if (blockCache.size() > capacity) {
     blockCache.erase(blockCache.begin() + capacity, blockCache.end());
   }
-  return blockCache.front().block_;
+  return blockCache.front().blockAndMetadata_;
 }
 }  // namespace
 
@@ -466,44 +469,44 @@ DecompressedBlock CompressedRelationReader::readPossiblyIncompleteBlock(
   auto config = getScanConfig(specForAllColumns,
                               std::move(allAdditionalColumns), locatedTriples);
 
-  // Helper lambda that returns the decompressed block or an empty block if
-  // `readAndDecompressBlock` returns `std::nullopt`.
-  auto readBlock = [&]() {
-    auto result = readAndDecompressBlock(blockMetadata, config);
-    if (scanMetadata.has_value()) {
-      scanMetadata.value().get().update(result);
-    }
-    if (result.has_value()) {
-      return std::move(result.value().block_);
-    } else {
-      return DecompressedBlock{config.scanColumns_.size(), allocator_};
-    }
-  };
-
-  // Only the rows matching the `scanSpec` are wanted, which for a bound
-  // subject is a handful out of tens of thousands, and the block below is only
-  // read. So a cached one is borrowed rather than copied: an `IdTable` cannot
-  // be copied implicitly, and cloning one would spend much of what the cache
-  // saves. See `lazy-index-scan-block-cache-size`.
+  // Only the rows matching the `scanSpec` are wanted, which for a bound subject
+  // is a handful out of tens of thousands, and the block below is only read. So
+  // a cached one is borrowed rather than copied: an `IdTable` cannot be copied
+  // implicitly, and cloning one would spend much of what the cache saves. See
+  // `lazy-index-scan-block-cache-size`, which is zero unless asked for.
   const size_t cacheCapacity =
       getRuntimeParameter<&RuntimeParameters::lazyIndexScanBlockCacheSize_>();
-  const bool cacheable =
-      cacheCapacity > 0 && locatedTriples.isEmpty() &&
-      config.graphFilter_.numRowsIsExact(blockMetadata);
+  const bool cacheable = cacheCapacity > 0 && locatedTriples.isEmpty() &&
+                         config.graphFilter_.numRowsIsExact(blockMetadata);
 
-  DecompressedBlock owned{0, allocator_};
-  const DecompressedBlock* cached =
-      cacheable ? findCachedBlock(blockMetadata.blockIndex_,
-                                  config.scanColumns_)
+  // Not in the cache: read it, and either hand it to the cache or keep it here.
+  // `std::nullopt` from `readAndDecompressBlock` means the block was skipped
+  // because of its graphs, which the cacheable case excludes.
+  std::optional<DecompressedBlockAndMetadata> read;
+  DecompressedBlock empty{config.scanColumns_.size(), allocator_};
+  const DecompressedBlockAndMetadata* entry =
+      cacheable ? findCachedBlock(blockMetadata.blockIndex_, config.scanColumns_)
                 : nullptr;
-  if (cached == nullptr) {
-    owned = readBlock();
-    cached = cacheable ? &addCachedBlock(blockMetadata.blockIndex_,
-                                         config.scanColumns_, std::move(owned),
-                                         cacheCapacity)
-                       : &owned;
+  if (entry == nullptr) {
+    read = readAndDecompressBlock(blockMetadata, config);
+    if (read.has_value() && cacheable) {
+      entry = &addCachedBlock(blockMetadata.blockIndex_, config.scanColumns_,
+                              std::move(read).value(), cacheCapacity);
+    } else if (read.has_value()) {
+      entry = &read.value();
+    }
   }
-  const DecompressedBlock& block = *cached;
+
+  // A hit reports itself exactly as a read would, so that the scan still
+  // accounts for every one of its blocks.
+  if (scanMetadata.has_value()) {
+    if (entry == nullptr) {
+      scanMetadata.value().get().update(std::nullopt);
+    } else {
+      scanMetadata.value().get().update(*entry);
+    }
+  }
+  const DecompressedBlock& block = entry == nullptr ? empty : entry->block_;
 
   // We now compute the range of the block according to the `scanSpec`. We
   // start with the full range of the block.
