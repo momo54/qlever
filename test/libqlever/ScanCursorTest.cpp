@@ -5,12 +5,18 @@
 
 #include <gmock/gmock.h>
 
+#include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <string>
 #include <vector>
 
 #include "../util/IndexTestHelpers.h"
+#include "index/Index.h"
 #include "libqlever/ScanCursor.h"
 #include "parser/TripleComponent.h"
+#include "util/AllocatorWithLimit.h"
+#include "util/Timer.h"
 
 using namespace qlever;
 using namespace testing;
@@ -71,6 +77,73 @@ struct Fixture {
 
 // The cursor enumerates exactly the matches of the triple pattern, and reports
 // an offset that advances by one per match.
+// Time the creation of a cursor against a real on-disk index, which is what an
+// engine that drives the joins itself does once per outer solution. Measured
+// through the JNI bridge it costs about 0.86 ms, flat in the size of the index
+// and flat in `lazy-index-scan-num-blocks-in-flight`; this says whether that
+// belongs to QLever or to the boundary. Skipped unless an index is named:
+//
+//   QLEVER_SCAN_BENCH_INDEX=/path/to/basename \
+//     ./ScanCursorTest --gtest_filter='*timeCursorCreation*'
+TEST(ScanCursor, timeCursorCreationAgainstARealIndex) {
+  const char* basename = std::getenv("QLEVER_SCAN_BENCH_INDEX");
+  if (basename == nullptr) {
+    GTEST_SKIP() << "set QLEVER_SCAN_BENCH_INDEX to an index basename";
+  }
+  auto allocator = ad_utility::makeUnlimitedAllocator<Id>();
+  Index index{allocator};
+  index.createFromOnDiskIndex(basename, false);
+  auto locatedTriples =
+      index.deltaTriplesManager().getCurrentLocatedTriplesSharedState();
+
+  // Subjects to bind, read from the index so that each of them exists.
+  constexpr size_t numCursors = 2000;
+  std::vector<Id> subjects;
+  {
+    using OptId = std::optional<Id>;
+    qlever::ScanCursor all{index.getImpl(), OptId{}, OptId{},
+                           OptId{}, locatedTriples, {}};
+    while (all.hasNext() && subjects.size() < numCursors) {
+      subjects.push_back(all.getId(qlever::ScanCursor::Component::Subject));
+      all.next();
+    }
+  }
+  ASSERT_EQ(subjects.size(), numCursors);
+
+  // Creation alone, without reading, which is lazy and so reads nothing.
+  using OptId = std::optional<Id>;
+  uint64_t sink = 0;
+  auto start = std::chrono::steady_clock::now();
+  for (Id subject : subjects) {
+    qlever::ScanCursor cursor{index.getImpl(), OptId{subject}, OptId{},
+                              OptId{},         locatedTriples, {}};
+    sink += cursor.cardinalityEstimate().first;
+  }
+  auto created = std::chrono::steady_clock::now();
+
+  // Creation plus the first read, which is what opens the scan.
+  size_t read = 0;
+  for (Id subject : subjects) {
+    qlever::ScanCursor cursor{index.getImpl(), OptId{subject}, OptId{},
+                              OptId{},         locatedTriples, {}};
+    if (cursor.hasNext()) {
+      sink += cursor.getId(qlever::ScanCursor::Component::Object).getBits();
+      ++read;
+    }
+  }
+  auto done = std::chrono::steady_clock::now();
+
+  auto ms = [](auto from, auto to) {
+    return std::chrono::duration<double, std::milli>(to - from).count();
+  };
+  std::cout << "\n== " << numCursors << " cursors on " << basename << "\n"
+            << "   construction only   " << ms(start, created) << " ms, "
+            << ms(start, created) / numCursors << " ms each\n"
+            << "   plus the first read " << ms(created, done) << " ms, "
+            << ms(created, done) / numCursors << " ms each  (" << read
+            << " read, checksum " << sink << ")\n";
+}
+
 TEST(ScanCursor, enumeratesAllMatchesAndCountsThem) {
   Fixture f;
   auto cursor = f.makeCursor(std::nullopt, iri("p"), std::nullopt);
