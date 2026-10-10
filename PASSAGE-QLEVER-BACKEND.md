@@ -271,6 +271,98 @@ The programs behind these numbers are in
 [`src/libqlever/jni/java/demo`](src/libqlever/jni/java/demo), with a
 [README](src/libqlever/jni/java/README.md) saying which index each expects.
 
+## Against Blazegraph, on WatDiv 10M
+
+Measured on 10,916,457 triples, the same data on both sides, with the two
+stores driving the same engine, by `QLeverVsBlazegraphTest` in the Passage
+fork. First 200,000 solutions, median of five timed runs after a warm-up:
+
+| | QLever /s | Blazegraph /s | |
+|---|---|---|---|
+| `?s ?p ?o` | **5,000,000** | 3,846,153 | QLever 1.3x |
+| `?s a ?c` | **8,012,647** | 4,540,500 | QLever 1.8x |
+| `?s a ?c . ?s ?p ?o` | 1,398,601 | **2,985,074** | Blazegraph 2.1x |
+
+They answer identically: the join restricted to `wsdbm:Genre8`, the least
+populated class, has eight solutions, the same on both. QLever's index is
+283 MB against 1.7 GB.
+
+So QLever reads faster and Blazegraph joins faster. The join is a sequence of
+point lookups, which is what a B-tree is for and what a block-compressed column
+store is not — but the factor was ninety-five before a cache of decompressed
+blocks, and is two after it.
+
+That cache is the finding here. Opening a scan decompresses a block and nothing
+keeps it, so a nested-loop join, which opens one per outer solution and lands
+in the same block thousands of times running, decompresses that block
+thousands of times. Asking for the *same* subject two thousand times costs
+0.919 ms each. It is not the index size (0.853 ms over a million triples,
+0.861 over eleven million), not the prefetch depth (0.856 to 0.860 ms as
+`lazy-index-scan-num-blocks-in-flight` goes from 20 to 1), and not the JNI
+boundary (0.0004 ms to construct a cursor in C++, 0.933 for its first read).
+
+None of which is an oversight: a merge join never returns to a block, so for
+QLever's own engine a cache would be pure overhead, and large blocks are the
+right trade for the sequential throughput it wants.
+`lazy-index-scan-block-cache-size` is therefore zero by default and
+`QLeverBackend` sets it to 16, taking the join from 24,384 solutions/s to
+1,418,439 — fifty-eight times.
+
+Two methodological notes, because both cost a wrong conclusion before being
+noticed. Blazegraph's scans are Java and compile as they run, so it reports
+around 800,000 solutions/s cold and 2,800,000 warm, while QLever's native
+scans gain a few percent: a benchmark without warm-up flatters QLever, and an
+earlier version of this section claimed it ahead on the join on that basis.
+And smaller blocks are worth sixteenfold *without* the cache and
+counterproductive with it, since one decompressed block then serves thousands
+of lookups — so `build-index.sh` uses QLever's default size.
+
+Against the bar this backend was built to clear — replacing an unmaintained
+dependency at comparable cost — a factor of two on joins against a sixfold
+smaller index, and an advantage on scans, is cleared.
+
+## A convention that is easy to get wrong
+
+`PassageScan` signals an unbound component of a triple pattern with **`null`**,
+not with `Backend.any()`: it hands the output of `Substitutor` straight to
+`Backend.search`. A backend therefore has to map `null` itself, as `HDTBackend`
+does:
+
+```java
+return new QLeverIterator(backend, Objects.isNull(s) ? any() : s, …);
+```
+
+This is not stated on the `Backend` interface, and it is invisible to any test
+that builds its scans itself — those pass `any()` explicitly. The first run of
+a real query through `passage-volcano` is what surfaces it.
+
+A second one: on a concrete `Backend<Long, String>`, the calls
+`getId(String, int...)` and `getId(VALUE, int...)` are ambiguous and `javac`
+refuses them. Passage itself only ever calls `getId` from generic code, where
+`VALUE` is a type variable, so the ambiguity does not arise there.
+
+## What is verified, and what is not
+
+Verified:
+
+* `ScanCursorTest` (6 tests) covers the enumeration, `skip`, the choice of
+  permutation, and the property the whole design rests on — that the offset
+  reported by one cursor, applied to a freshly created one, restores exactly
+  the same position.
+* Through the JNI bridge on a 2,000,000 triple index, `skip` to offset
+  1,999,990 and the matching solution come back in well under a millisecond.
+  Against the same build without the block skipping, 200 random deep skips cost
+  6.125 ms each instead of 0.430 ms.
+* 200 iterations of `search` + `skip` to a random offset + read, which is the
+  pattern a continuation engine repeats: 0.416 ms each, against 0.764 ms for a
+  cursor that opens its scan eagerly.
+* A BGP through `passage-volcano`, as above: termination, and complete and
+  correct results.
+
+The programs behind these numbers are in
+[`src/libqlever/jni/java/demo`](src/libqlever/jni/java/demo), with a
+[README](src/libqlever/jni/java/README.md) saying which index each expects.
+
 ## Against Blazegraph, and the block size that decides it
 
 Measured on WatDiv 10M — 10,916,457 triples, the same data on both sides — with
