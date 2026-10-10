@@ -297,11 +297,31 @@ and not the JNI boundary (0.0004 ms to construct a cursor in C++, 0.933 for its
 first read). A block holds 250 kB per column, so one triple can cost a megabyte
 of Zstd, which is the millisecond measured.
 
-So the default is tuned for QLever's own engine, which scans many rows at a
-time, and Passage does the opposite. At 1,000 rows per block the join is
-sixteen times faster for five percent more disk, long scans are unchanged, and
-opening a scan already costs less than Blazegraph does. `build-index.sh` in the
-Passage module builds indexes that way; the figures above are what it is for.
+So the default is not a bad one: it is the right trade for merge joins, which
+is what QLever's engine does, and large blocks give those the sequential
+throughput and the compression ratio they want. Passage cannot merge-join,
+because a continuation has to stop mid-join and resume from a query, so it
+nests loops and reads a handful of rows per scan. The same storage, the
+opposite access pattern.
+
+At 1,000 rows per block the join is sixteen times faster for five percent more
+disk, long scans are unchanged, and opening a scan already costs less than
+Blazegraph does. `build-index.sh` in the Passage module builds indexes that
+way; the figures above are what it is for.
+
+That setting, though, is a workaround for something else. The same 2,000 scans
+cost 0.923 ms each when their subjects come out of the index in order and
+0.922 ms when shuffled — no difference at all, although at 31,250 rows a block
+spans some 400 consecutive subjects. Four hundred lookups into one block
+decompress that same megabyte four hundred times, because QLever caches query
+results and vocabulary lookups but not decompressed blocks.
+
+Which is the same design choice again, not an oversight: a merge join never
+returns to a block, so keeping one would be dead weight. For a nested-loop
+join it is the whole cost. A single-entry cache of the last decompressed block
+would collapse those four hundred decompressions into one, which is an order of
+magnitude beyond what the block size buys — and it belongs in
+`CompressedRelationReader`, where this fork already patches the `OFFSET` path.
 
 What is left runs both ways rather than one. On the join QLever stays 1.9x
 behind at 1,000 rows and 1.3x at 100; on a scan with the predicate bound it is

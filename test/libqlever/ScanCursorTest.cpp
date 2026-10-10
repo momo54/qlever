@@ -5,9 +5,11 @@
 
 #include <gmock/gmock.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -121,7 +123,12 @@ TEST(ScanCursor, timeCursorCreationAgainstARealIndex) {
   }
   auto created = std::chrono::steady_clock::now();
 
-  // Creation plus the first read, which is what opens the scan.
+  // Creation plus the first read, which is what opens the scan. Done twice:
+  // in the order the subjects came out of the index, so that consecutive scans
+  // land in the same block, and then shuffled, so that they do not. QLever
+  // caches query results and vocabulary lookups but not decompressed blocks —
+  // a merge join never returns to one — so the two should cost the same, which
+  // is what says whether a block is decompressed again for every lookup.
   size_t read = 0;
   for (Id subject : subjects) {
     qlever::ScanCursor cursor{index.getImpl(), OptId{subject}, OptId{},
@@ -133,15 +140,30 @@ TEST(ScanCursor, timeCursorCreationAgainstARealIndex) {
   }
   auto done = std::chrono::steady_clock::now();
 
+  auto shuffled = subjects;
+  std::mt19937 generator{42};
+  std::shuffle(shuffled.begin(), shuffled.end(), generator);
+  for (Id subject : shuffled) {
+    qlever::ScanCursor cursor{index.getImpl(), OptId{subject}, OptId{},
+                              OptId{},         locatedTriples, {}};
+    if (cursor.hasNext()) {
+      sink += cursor.getId(qlever::ScanCursor::Component::Object).getBits();
+    }
+  }
+  auto shuffledDone = std::chrono::steady_clock::now();
+
   auto ms = [](auto from, auto to) {
     return std::chrono::duration<double, std::milli>(to - from).count();
   };
   std::cout << "\n== " << numCursors << " cursors on " << basename << "\n"
-            << "   construction only   " << ms(start, created) << " ms, "
+            << "   construction only    " << ms(start, created) << " ms, "
             << ms(start, created) / numCursors << " ms each\n"
-            << "   plus the first read " << ms(created, done) << " ms, "
+            << "   first read, in order " << ms(created, done) << " ms, "
             << ms(created, done) / numCursors << " ms each  (" << read
-            << " read, checksum " << sink << ")\n";
+            << " read)\n"
+            << "   first read, shuffled " << ms(done, shuffledDone) << " ms, "
+            << ms(done, shuffledDone) / numCursors << " ms each\n"
+            << "   checksum " << sink << "\n";
 }
 
 TEST(ScanCursor, enumeratesAllMatchesAndCountsThem) {
