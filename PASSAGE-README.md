@@ -131,6 +131,8 @@ the build files and compiles nothing. The binaries appear during the second.
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target qlever-index qlever-server CompressedRelationsTest -j $(nproc)
+
+QLEVER=$PWD/build   # the steps below change directory, so name it now
 ```
 
 `cmake --build` writes `build/qlever-index` and `build/qlever-server`, which is
@@ -159,6 +161,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 
 cmake --build build --target qlever-index qlever-server CompressedRelationsTest \
       -j $(sysctl -n hw.ncpu)
+
+QLEVER=$PWD/build   # the steps below change directory, so name it now
 ```
 
 #### What breaks on macOS and why
@@ -248,7 +252,7 @@ This writes 1.3 GB and takes about 13 s; the index below adds 1.8 GB.
 ### 3. Build the index
 
 ```bash
-/path/to/build/qlever-index -i testidx -f data.ttl -F ttl -p true
+$QLEVER/qlever-index -i testidx -f data.ttl -F ttl -p true
 ```
 
 About 20 s. The log confirms the geometry the measurement relies on:
@@ -260,7 +264,7 @@ Statistics for PSO: #relations = 1, #blocks = 640, #triples = 20,000,000
 ### 4. Start the server
 
 ```bash
-/path/to/build/qlever-server -i testidx -p 7021 -j 4 -m 4G
+$QLEVER/qlever-server -i testidx -p 7021 -j 4 -m 4G
 ```
 
 ### 5. Run queries
