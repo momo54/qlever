@@ -173,7 +173,10 @@ JNIEXPORT jlong JNICALL Java_fr_gdd_passage_qlever_QLeverNative_any(JNIEnv*,
 }
 
 // Look up `value` in the vocabulary. Returns the `any` sentinel if the value
-// does not occur in the index, which makes any scan using it empty.
+// does not occur in the index. NOTE that this is indistinguishable from an
+// unbound component, so a scan built from it matches EVERY triple rather than
+// none: the caller has to check for the sentinel and report the value as
+// absent. `QLeverBackend.getId` on the Java side does that.
 JNIEXPORT jlong JNICALL Java_fr_gdd_passage_qlever_QLeverNative_getId(
     JNIEnv* env, jclass, jlong backend, jstring value) {
   return guarded(
