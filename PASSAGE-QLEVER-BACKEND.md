@@ -31,7 +31,7 @@ over — and is the subject of the companion change described in
 passage-volcano  (Java)          the continuation engine, unchanged
       │  Backend<Long,String> / BackendIterator<Long,String>
       ▼
-QLeverBackend, QLeverIterator    src/libqlever/jni/java/
+QLeverBackend, QLeverIterator    the Passage repository, passage-qlever/
       │  QLeverNative, batches of 1024 matches
       ▼
 libqleverjni  (JNI, C++)         src/libqlever/jni/QleverJni.cpp
@@ -140,30 +140,30 @@ the pinned one, and `range-v3` against a recent Apple Clang.
 
 ### The Java side
 
-`src/libqlever/jni/java/fr/gdd/passage/qlever/` holds three classes that depend
-only on `passage-commons`. They belong in a `passage-qlever` module of the
-Passage repository and live here next to the bridge they bind; move them there
-as they are.
+The three classes this bridge binds — `QLeverNative`, `QLeverIterator` and
+`QLeverBackend` — live in the [Passage](https://github.com/passage-org/passage)
+repository, in its `passage-qlever` module. They were drafted here, next to the
+bridge, and moved there once that module existed. No copy is kept here any
+more: the two diverged in silence, and the copy in this tree still held two
+bugs the module had already fixed — an absent IRI that matched every triple
+instead of none, and an iterator that read before it advanced.
 
-`passage-commons` is not published to any Maven repository, so it has to be
-built from source:
-
-```bash
-git clone https://github.com/passage-org/passage.git
-cd passage && mvn -pl passage-commons -am install -DskipTests
-```
-
-This installs `fr.gdd:passage-commons:0.2.0` locally. That version is the one
-carried by the project's `master` rather than a release, so it moves; this
-backend was written against commit `8d38952`.
+From a clone of Passage, that module builds this bridge itself:
 
 ```bash
-javac -cp ~/.m2/repository/fr/gdd/passage-commons/0.2.0/passage-commons-0.2.0.jar:… \
-      -d classes fr/gdd/passage/qlever/*.java
+git submodule update --init passage-qlever/qlever   # this fork, pinned
+mvn -pl passage-qlever install -Pnative -DskipTests
 ```
 
-See [`src/libqlever/jni/java/README.md`](src/libqlever/jni/java/README.md) for
-the full classpath, which `mvn dependency:build-classpath` produces.
+Its `README.md` carries the whole recipe, including the `JAVA_HOME` and macOS
+pitfalls; its `journal.md` carries what was decided along the way, what was
+measured, and which conclusions later measurements reversed.
+
+`demo/` stays in this tree: seven programs that drive the bridge from the
+command line, with no Maven and no engine around them, and they are what back
+the numbers quoted below. They compile against the module's jar; see
+[`src/libqlever/jni/java/README.md`](src/libqlever/jni/java/README.md) for the
+classpath, which `mvn dependency:build-classpath` produces.
 
 ## Running it
 

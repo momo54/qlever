@@ -1,9 +1,8 @@
 # The Java side of the QLever JNI bridge
 
-`fr/gdd/passage/qlever/` holds a [Passage](https://github.com/passage-org/passage)
-backend over a QLever index. It belongs in a `passage-qlever` module of the
-Passage repository and lives here next to the bridge it binds; move it there as
-it is.
+The [Passage](https://github.com/passage-org/passage) backend over a QLever
+index was drafted here, next to the bridge it binds, and now lives in the
+Passage repository, in its `passage-qlever` module:
 
 | | |
 | --- | --- |
@@ -11,26 +10,37 @@ it is.
 | `QLeverIterator` | `BackendIterator<Long, String>`, batching matches across JNI |
 | `QLeverBackend` | `Backend<Long, String>` |
 
-`demo/` holds the programs that were used to verify the chain. They are what
-back the numbers quoted in [PASSAGE-QLEVER-BACKEND.md](../../../../PASSAGE-QLEVER-BACKEND.md);
-run them to reproduce those numbers rather than taking them on trust.
+No copy of those three is kept in this tree any more. The two diverged without
+a word, and the copy here still had an absent IRI matching every triple
+instead of none, and an iterator that read before it advanced — both of them
+fixed in the module a week after this copy was last touched. Compile against
+the module, never against a copy.
+
+What stays here is `demo/`: the programs that were used to verify the chain,
+and they are what back the numbers quoted in
+[PASSAGE-QLEVER-BACKEND.md](../../../../PASSAGE-QLEVER-BACKEND.md); run them to
+reproduce those numbers rather than taking them on trust.
 
 ## Building
 
-`passage-commons` and `passage-volcano` are **not published to any Maven
-repository** — there is nothing under the `fr.gdd` group on Maven Central — so
-they have to be built from source and installed into the local repository:
+`passage-qlever`, `passage-commons` and `passage-volcano` are **not published
+to any Maven repository** — there is nothing under the `fr.gdd` group on Maven
+Central — so they have to be built from source and installed into the local
+repository. `passage-qlever` is the module that holds the three classes, so it
+is the one the demos here compile against:
 
 ```bash
 export JAVA_HOME=$(brew --prefix openjdk@21)   # or wherever a 21 lives
-git clone https://github.com/passage-org/passage.git
+git clone git@gitlab.univ-nantes.fr:molli-p/passage.git
 cd passage
-git checkout 8d38952      # what this backend was written against
-mvn -pl passage-volcano -am install -DskipTests
+git checkout filter-continuation   # the branch that carries passage-qlever
+mvn -pl passage-qlever,passage-volcano -am install -DskipTests
 ```
 
-That produces `fr.gdd:passage-commons:0.2.0` and `fr.gdd:passage-volcano:0.2.0`
-in `~/.m2`, along with `jena-utils`, `raw` and `passage-blazegraph`.
+That produces `fr.gdd:passage-qlever:0.2.0`, `passage-commons:0.2.0` and
+`passage-volcano:0.2.0` in `~/.m2`, along with `jena-utils`, `raw` and
+`passage-blazegraph`. `passage-qlever` has not been merged upstream, which is
+why the clone above is the Nantes fork and not `passage-org/passage`.
 
 `JAVA_HOME` is load-bearing. Passage targets release 21, so a Maven running
 under a 17 — which a version manager pinned to an older default gives you —
@@ -71,19 +81,24 @@ LIB=$PWD/build/lib/libqleverjni.so        # .dylib on macOS
 JDK=$(brew --prefix openjdk@21)/bin       # or wherever a 21 lives
 ```
 
-The classpath is every jar `passage-volcano` pulls in. The clone above is the
-only thing that can put them in `~/.m2`, but it is not needed again afterwards
-to recompute the classpath, which matters because the clone is usually gone by
-the time anyone reruns this. A pom that depends on nothing else resolves it
-from whatever `~/.m2` already holds:
+The classpath is every jar `passage-volcano` and `passage-qlever` pull in. The
+clone above is the only thing that can put them in `~/.m2`, but it is not
+needed again afterwards to recompute the classpath, which matters because the
+clone is usually gone by the time anyone reruns this. A pom that depends on
+nothing else resolves it from whatever `~/.m2` already holds:
 
 ```bash
 cat > pom.xml <<'EOF'
 <project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>
   <groupId>local</groupId><artifactId>cp</artifactId><version>0</version>
-  <dependencies><dependency><groupId>fr.gdd</groupId>
-    <artifactId>passage-volcano</artifactId><version>0.2.0</version>
-  </dependency></dependencies></project>
+  <dependencies>
+    <dependency><groupId>fr.gdd</groupId>
+      <artifactId>passage-volcano</artifactId><version>0.2.0</version>
+    </dependency>
+    <dependency><groupId>fr.gdd</groupId>
+      <artifactId>passage-qlever</artifactId><version>0.2.0</version>
+    </dependency>
+  </dependencies></project>
 EOF
 mvn -q dependency:build-classpath -Dmdep.outputFile=cp.txt
 CP=$(cat cp.txt)
@@ -93,8 +108,7 @@ CP=$(cat cp.txt)
 once.
 
 ```bash
-$JDK/javac -cp "$CP" -d classes fr/gdd/passage/qlever/*.java
-$JDK/javac -cp "${CP}:classes" -d classes demo/*.java
+$JDK/javac -cp "$CP" -d classes demo/*.java
 ```
 
 NOTE: the braces in `"${CP}:classes"` are not decoration. In zsh, which is the
@@ -103,7 +117,9 @@ silently yields `...jarlasses`, so the last entry is mangled and the class is
 not found. Bash leaves it alone, which is why this reads as a working command
 and is not one.
 
-`SmokeTest` needs neither Passage jar, only `QLeverNative`.
+`SmokeTest` loads only `QLeverNative`, which has no dependencies of its own,
+but it comes off the `passage-qlever` jar like the rest — so every command
+below carries the classpath, where two of them used to need only `classes`.
 
 ## The two indexes the demos expect
 
@@ -123,9 +139,9 @@ six triples are listed in
 ## Running them
 
 ```bash
-$JDK/java -cp classes            SmokeTest       "$LIB" testidx
+$JDK/java -cp "${CP}:classes"    SmokeTest       "$LIB" testidx
 $JDK/java -cp "${CP}:classes"    BackendTest     "$LIB" testidx
-$JDK/java -cp classes            SkipBench       "$LIB" testidx
+$JDK/java -cp "${CP}:classes"    SkipBench       "$LIB" testidx
 $JDK/java -cp "${CP}:classes"    PassageOnQlever "$LIB" fig2
 ```
 
@@ -149,7 +165,7 @@ read the verdict the demo prints and ignore the status.
 
 * **`SmokeTest`** exercises the native methods directly: the vocabulary, a bulk
   read, a deep `skip`, the round trip of an offset through a fresh cursor, and
-  exhaustion past the end. Twelve checks, no Passage dependency.
+  exhaustion past the end. Twelve checks, and it touches no Passage type.
 * **`BackendTest`** does the same through `Backend<Long, String>` and
   `BackendIterator<Long, String>`, that is, through the types
   `passage-volcano` sees.
