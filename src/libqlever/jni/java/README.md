@@ -134,7 +134,7 @@ build/qlever-index -i testidx -f data.ttl -F ttl -p true
 
 `PassageOnQlever` runs against the graph of Figure 2 of the Passage paper; the
 six triples are listed in
-[PASSAGE-QLEVER-BACKEND.md](../../../../PASSAGE-QLEVER-BACKEND.md#running-it).
+[PASSAGE-QLEVER-BACKEND.md](../../../../PASSAGE-QLEVER-BACKEND.md#running-it-end-to-end).
 
 ## Running them
 
