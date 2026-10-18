@@ -14,6 +14,7 @@
 
 #include <jni.h>
 
+#include <iostream>
 #include <memory>
 #include <new>
 #include <string>
@@ -165,6 +166,72 @@ JNIEXPORT jlong JNICALL Java_fr_gdd_passage_qlever_QLeverNative_openBackend(
 JNIEXPORT void JNICALL Java_fr_gdd_passage_qlever_QLeverNative_closeBackend(
     JNIEnv*, jclass, jlong backend) {
   delete fromHandle<BackendHandle>(backend);
+}
+
+// The index of the snapshot this backend was opened on. Every scan of this
+// backend reads that one snapshot, so the offsets a continuation carries stay
+// meaningful for as long as the backend lives.
+JNIEXPORT jlong JNICALL
+Java_fr_gdd_passage_qlever_QLeverNative_snapshotId(JNIEnv* env, jclass,
+                                                   jlong backend) {
+  return guarded(
+      env,
+      [&]() -> jlong {
+        return static_cast<jlong>(
+            fromHandle<BackendHandle>(backend)->locatedTriples_->index_);
+      },
+      -1);
+}
+
+// The index of the snapshot the engine would hand out now. It differs from
+// `snapshotId` exactly when the graph has been modified since this backend was
+// opened, which is what a continuation needs to know before trusting an offset
+// it was given earlier.
+//
+// NOTE: this takes a deep copy of the current snapshot, because that is the
+// only public way in. A one-line accessor on `DeltaTriplesManager` would make
+// it free; see `getLocatedTriplesSharedStateReference`, which exists on
+// `DeltaTriples` but is not reachable from the manager.
+JNIEXPORT jlong JNICALL
+Java_fr_gdd_passage_qlever_QLeverNative_currentSnapshotId(JNIEnv* env, jclass,
+                                                           jlong backend) {
+  return guarded(
+      env,
+      [&]() -> jlong {
+        auto* handle = fromHandle<BackendHandle>(backend);
+        return static_cast<jlong>(handle->index_.deltaTriplesManager()
+                                      .getCurrentLocatedTriplesSharedState()
+                                      ->index_);
+      },
+      -1);
+}
+
+// Insert one triple, so that a test can move the snapshot and check that the
+// move is noticed. The bridge is otherwise read-only: nothing else here can
+// change the graph, which is why a backend's snapshot normally never moves.
+JNIEXPORT void JNICALL
+Java_fr_gdd_passage_qlever_QLeverNative_moveSnapshotForTesting(JNIEnv* env,
+                                                                jclass,
+                                                                jlong backend) {
+  guarded(
+      env,
+      [&]() -> jlong {
+        auto* handle = fromHandle<BackendHandle>(backend);
+        // Only `insertTriples`, `deleteTriples` and `addFromSnapshotDiff`
+        // raise the index; `clear()` does not. The triple itself is never
+        // read back.
+        auto undef = Id::makeUndefined();
+        DeltaTriples::Triples triples{IdTriple<0>{{undef, undef, undef}}};
+        handle->index_.deltaTriplesManager().modify<void>(
+            [&](DeltaTriples& deltaTriples) {
+              deltaTriples.insertTriples(
+                  std::make_shared<ad_utility::CancellationHandle<>>(),
+                  std::move(triples));
+            },
+            false, true);
+        return 0;
+      },
+      0);
 }
 
 JNIEXPORT jlong JNICALL Java_fr_gdd_passage_qlever_QLeverNative_any(JNIEnv*,
