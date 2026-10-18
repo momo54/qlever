@@ -31,7 +31,7 @@ is the one the demos here compile against:
 
 ```bash
 export JAVA_HOME=$(brew --prefix openjdk@21)   # or wherever a 21 lives
-git clone git@gitlab.univ-nantes.fr:molli-p/passage.git
+git clone https://github.com/momo54/passage.git
 cd passage
 git checkout filter-continuation   # the branch that carries passage-qlever
 mvn -pl passage-qlever,passage-volcano -am install -DskipTests
