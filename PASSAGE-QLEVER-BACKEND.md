@@ -25,6 +25,14 @@ hold — an `OFFSET` was applied by reading and discarding the triples it skips
 over — and is the subject of the companion change described in
 [PASSAGE-README.md](PASSAGE-README.md).
 
+This fork is a consequence of that backend rather than a project beside it: it
+exists so that Passage has a QLever one. The module that uses it is
+`passage-qlever` in the Passage repository, and that is where the backend is
+documented, measured and tested, in its `README.md` and its `journal.md`. What
+belongs here is what QLever itself carries, and what could be offered
+upstream: the `OFFSET` patch above, `qlever::ScanCursor`, the JNI bridge, and
+the standalone demos under `src/libqlever/jni/java/demo`.
+
 ## Architecture
 
 ```
