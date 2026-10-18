@@ -376,6 +376,42 @@ NOTE: an earlier version of this section reported +53 % and 9.4 ms per query at
 2 M triples. Those figures were taken before this branch was rebased onto
 upstream, from two separate builds, and they do not reproduce.
 
+## Why this matters at scale, and not only as a speed-up
+
+The section above measures a constant cost per block skipped. The consequence
+is what decides whether this patch is worth carrying, and it is not a
+percentage.
+
+Extrapolating the measured slope to a single resumption:
+
+| offset | one resumption, without the skipping |
+|---|---|
+| 10⁷ | 38 ms |
+| 10⁹ | 1.6 — 3.5 s |
+| 10¹⁰ | 16 — 35 s |
+
+The range is honest rather than coy: this document measures 0.048—0.051 ms
+per block over the HTTP path, and a later measurement through the JNI cursor
+measured 0.11 ms per block, so 1.6 against 3.4 ms per million rows. The two
+have not been reconciled — the likeliest reason is that `lazyScan` reads up
+to 21 blocks concurrently, which the two paths do not exercise alike — and
+the conclusion below holds on either figure.
+
+Passage, which this was written for, only terminates under a *progress
+condition*: each continuation must return at least one new solution within its
+quota. Once merely *reaching* the resume point costs more than the quota, no
+solution is returned, the next continuation is identical to the last, and the
+sequence never terminates. The engine does not slow down; it stops working.
+
+On WatDiv's ten million triples that threshold is far away and the patch is
+worth roughly a factor of two. On a graph like UniProt, 245 billion triples, a
+continuation sequence reaches offsets of 10⁹ and beyond as a matter of course,
+and there the patch is the difference between terminating and not.
+
+This is the argument for the change, and an earlier version of this work
+presented it as an optimisation instead. That was wrong, and it matters because
+an optimisation is optional.
+
 ## Tests
 
 `test/CompressedRelationsTest.cpp` gains two tests. Both use a helper that
