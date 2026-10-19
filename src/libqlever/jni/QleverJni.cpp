@@ -366,17 +366,41 @@ JNIEXPORT jint JNICALL Java_fr_gdd_passage_qlever_QLeverNative_fill(
   return guarded(
       env,
       [&]() -> jint {
+        // Both buffers are kept per thread and reused, because this is the
+        // hot path of a nested-loop join: one call per scan opened, plus the
+        // one that returns zero and ends the loop. Allocating them here
+        // instead cost an allocation and a 24 kB zero-fill per call, sized on
+        // the Java array rather than on the number of matches, so a scan
+        // returning twenty matches paid for 1024 of them. Measured on a join
+        // over WatDiv 10M with a fan-out of twenty, that was three quarters of
+        // the whole cost of crossing the boundary.
+        //
+        // Per thread for the same reason the block cache is: no lock on a path
+        // walked constantly. The price is ~48 kB held per thread until it
+        // exits, and one more `thread_local` destructor on the thread-exit
+        // path that jemalloc crashes on; see `PASSAGE-QLEVER-BACKEND.md`.
+        thread_local std::vector<Id> buffer;
+        thread_local std::vector<jlong> asLongs;
+
         auto length = static_cast<size_t>(env->GetArrayLength(out));
-        std::vector<Id> buffer(length);
+        if (buffer.size() < length) {
+          buffer.resize(length);
+        }
+        // Bounded by the Java array, which may be shorter than a buffer grown
+        // by an earlier call.
         size_t written = fromHandle<qlever::ScanCursor>(cursor)->fill(
-            ql::span<Id>{buffer}, static_cast<size_t>(maxTuples));
+            ql::span<Id>{buffer.data(), length},
+            static_cast<size_t>(maxTuples));
         // `Id` and `jlong` are both 64 bit, but not layout-compatible as far as
         // the standard is concerned, so convert explicitly.
-        std::vector<jlong> asLongs(3 * written);
-        for (size_t i = 0; i < asLongs.size(); ++i) {
+        const size_t ids = 3 * written;
+        if (asLongs.size() < ids) {
+          asLongs.resize(ids);
+        }
+        for (size_t i = 0; i < ids; ++i) {
           asLongs[i] = static_cast<jlong>(buffer[i].getBits());
         }
-        env->SetLongArrayRegion(out, 0, static_cast<jsize>(asLongs.size()),
+        env->SetLongArrayRegion(out, 0, static_cast<jsize>(ids),
                                 asLongs.data());
         return static_cast<jint>(written);
       },

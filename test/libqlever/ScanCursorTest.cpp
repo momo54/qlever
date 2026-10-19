@@ -88,6 +88,117 @@ struct Fixture {
 //
 //   QLEVER_SCAN_BENCH_INDEX=/path/to/basename \
 //     ./ScanCursorTest --gtest_filter='*timeCursorCreation*'
+// The join `?s rdf:type ?c . ?s ?p ?o` run entirely in C++, so that the same
+// join through the JNI bridge can be compared against it. The published
+// comparison against Blazegraph has QLever losing that join by a factor of
+// two, and Blazegraph's backend is pure Java while this one crosses a foreign
+// function boundary — so the published figure cannot say which of the two it
+// measures. This one can.
+//
+// Two consumption styles, because the boundary dictates one of them:
+//
+//   * tuple at a time, `hasNext`/`getId`/`next`, what a C++ engine would do;
+//   * bulk, `fill` into a buffer of 3 x 1024 `Id`s, what the bridge does,
+//     minus the crossing itself.
+//
+// If the bulk figure here matches the one through JNI, the boundary is free
+// and the join difference belongs to the storage. If it does not, the
+// difference is the boundary, and the published comparison measures the
+// bridge rather than the index.
+//
+//   QLEVER_SCAN_BENCH_INDEX=/path/to/basename \
+//     ./ScanCursorTest --gtest_filter='*timeAJoin*'
+TEST(ScanCursor, timeAJoinAgainstARealIndex) {
+  const char* basename = std::getenv("QLEVER_SCAN_BENCH_INDEX");
+  if (basename == nullptr) {
+    GTEST_SKIP() << "set QLEVER_SCAN_BENCH_INDEX to an index basename";
+  }
+  auto allocator = ad_utility::makeUnlimitedAllocator<Id>();
+  Index index{allocator};
+  index.createFromOnDiskIndex(basename, false);
+  auto locatedTriples =
+      index.deltaTriplesManager().getCurrentLocatedTriplesSharedState();
+
+  // The same cache the Passage backend sets, so that the two sides of the
+  // comparison differ in the boundary and in nothing else.
+  setRuntimeParameter<&RuntimeParameters::lazyIndexScanBlockCacheSize_>(16);
+
+  // 200,000 solutions, the unit the published comparison uses.
+  constexpr size_t target = 200'000;
+  constexpr size_t batchSize = 1024;
+  using OptId = std::optional<Id>;
+  using OptTc = std::optional<TripleComponent>;
+  const auto typeIri = OptTc{TripleComponent::Iri::fromIriref(
+      "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>")};
+
+  auto ms = [](auto from, auto to) {
+    return std::chrono::duration<double, std::milli>(to - from).count();
+  };
+  auto perSecond = [](size_t n, double millis) {
+    return millis > 0 ? static_cast<size_t>(n / millis * 1000.0) : size_t{0};
+  };
+
+  // Tuple at a time.
+  size_t solutions = 0;
+  size_t outers = 0;
+  auto start = std::chrono::steady_clock::now();
+  {
+    ScanCursor outer{index.getImpl(), OptTc{}, typeIri, OptTc{},
+                     locatedTriples, {}};
+    while (outer.hasNext() && solutions < target) {
+      Id subject = outer.getId(Component::Subject);
+      ++outers;
+      ScanCursor inner{index.getImpl(), OptId{subject}, OptId{},
+                       OptId{},         locatedTriples, {}};
+      while (inner.hasNext() && solutions < target) {
+        // Read a component, so that the scan is not optimised into counting.
+        [[maybe_unused]] volatile auto sink =
+            inner.getId(Component::Object).getBits();
+        ++solutions;
+        inner.next();
+      }
+      outer.next();
+    }
+  }
+  auto tupleAtATime = std::chrono::steady_clock::now();
+
+  // Bulk, as the bridge consumes it.
+  size_t bulkSolutions = 0;
+  std::vector<Id> buffer(3 * batchSize);
+  {
+    ScanCursor outer{index.getImpl(), OptTc{}, typeIri, OptTc{},
+                     locatedTriples, {}};
+    while (outer.hasNext() && bulkSolutions < target) {
+      Id subject = outer.getId(Component::Subject);
+      ScanCursor inner{index.getImpl(), OptId{subject}, OptId{},
+                       OptId{},         locatedTriples, {}};
+      size_t written = 0;
+      while ((written = inner.fill(ql::span<Id>{buffer}, batchSize)) > 0 &&
+             bulkSolutions < target) {
+        for (size_t i = 0; i < written; ++i) {
+          [[maybe_unused]] volatile auto sink = buffer[3 * i + 2].getBits();
+        }
+        bulkSolutions += written;
+      }
+      outer.next();
+    }
+  }
+  auto bulk = std::chrono::steady_clock::now();
+
+  ASSERT_EQ(solutions, target);
+  ASSERT_EQ(bulkSolutions >= target, true);
+
+  std::cout << "\n  join ?s rdf:type ?c . ?s ?p ?o, first " << target
+            << " solutions, " << outers << " outer solutions, block cache 16\n"
+            << "    tuple at a time  " << ms(start, tupleAtATime) << " ms  "
+            << perSecond(solutions, ms(start, tupleAtATime)) << " /s\n"
+            << "    bulk, fill(1024) " << ms(tupleAtATime, bulk) << " ms  "
+            << perSecond(bulkSolutions, ms(tupleAtATime, bulk)) << " /s\n"
+            << "    fan-out          "
+            << (outers > 0 ? solutions / outers : 0) << " solutions per scan\n"
+            << std::endl;
+}
+
 TEST(ScanCursor, timeCursorCreationAgainstARealIndex) {
   const char* basename = std::getenv("QLEVER_SCAN_BENCH_INDEX");
   if (basename == nullptr) {
