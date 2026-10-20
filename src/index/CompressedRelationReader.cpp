@@ -13,6 +13,7 @@
 // You may not use this file except in compliance with the Apache 2.0 License,
 // which can be found in the `LICENSE` file at the root of the QLever project.
 
+#include <atomic>
 #include "index/CompressedRelationReader.h"
 
 #include <algorithm>
@@ -195,7 +196,11 @@ struct CachedBlock {
   // Which reader the block came from. Block indices are relative to a
   // permutation and there is a reader per permutation, so without this the
   // block 0 of one is served when another asks for its own.
-  const void* reader_;
+  //
+  // An id and not the reader's address: the cache is `thread_local`, so it
+  // outlives an index, and a reader allocated after one is destroyed can reuse
+  // the address. See `CompressedRelationReader::cacheId_`.
+  uint64_t reader_;
   size_t blockIndex_;
   std::vector<ColumnIndex> columns_;
   DecompressedBlockAndMetadata blockAndMetadata_;
@@ -206,7 +211,7 @@ thread_local std::vector<CachedBlock> blockCache;
 // The cached entry for `blockIndex` and `columns`, or `nullptr`. A hit is moved
 // to the front, so that a cache of a few entries keeps the ones in use.
 const DecompressedBlockAndMetadata* findCachedBlock(
-    const void* reader, size_t blockIndex,
+    uint64_t reader, size_t blockIndex,
     const std::vector<ColumnIndex>& columns) {
   auto it = ql::ranges::find_if(blockCache, [&](const CachedBlock& entry) {
     return entry.reader_ == reader && entry.blockIndex_ == blockIndex &&
@@ -222,7 +227,7 @@ const DecompressedBlockAndMetadata* findCachedBlock(
 // Take `blockAndMetadata` into the cache and return a reference to it there,
 // dropping the least recently used entries beyond `capacity`.
 const DecompressedBlockAndMetadata& addCachedBlock(
-    const void* reader, size_t blockIndex, std::vector<ColumnIndex> columns,
+    uint64_t reader, size_t blockIndex, std::vector<ColumnIndex> columns,
     DecompressedBlockAndMetadata blockAndMetadata, size_t capacity) {
   blockCache.insert(blockCache.begin(),
                     CachedBlock{reader, blockIndex, std::move(columns),
@@ -233,6 +238,13 @@ const DecompressedBlockAndMetadata& addCachedBlock(
   return blockCache.front().blockAndMetadata_;
 }
 }  // namespace
+
+// Monotonic, so that an address reused after an index is destroyed cannot
+// collide with the blocks the previous reader left in a thread's cache.
+uint64_t CompressedRelationReader::nextCacheId() {
+  static std::atomic<uint64_t> counter{0};
+  return counter.fetch_add(1, std::memory_order_relaxed);
+}
 
 namespace {
 // Return the index of the first block that an `OFFSET` does not consume
@@ -491,13 +503,13 @@ DecompressedBlock CompressedRelationReader::readPossiblyIncompleteBlock(
   std::optional<DecompressedBlockAndMetadata> read;
   DecompressedBlock empty{config.scanColumns_.size(), allocator_};
   const DecompressedBlockAndMetadata* entry =
-      cacheable ? findCachedBlock(this, blockMetadata.blockIndex_,
+      cacheable ? findCachedBlock(cacheId_, blockMetadata.blockIndex_,
                                   config.scanColumns_)
                 : nullptr;
   if (entry == nullptr) {
     read = readAndDecompressBlock(blockMetadata, config);
     if (read.has_value() && cacheable) {
-      entry = &addCachedBlock(this, blockMetadata.blockIndex_,
+      entry = &addCachedBlock(cacheId_, blockMetadata.blockIndex_,
                               config.scanColumns_, std::move(read).value(),
                               cacheCapacity);
     } else if (read.has_value()) {

@@ -247,6 +247,19 @@ class CompressedRelationReader {
       ad_utility::InputRangeTypeErased<IdTable, LazyScanMetadata>;
 
  private:
+  // Identifies this reader in the thread-local cache of decompressed blocks.
+  //
+  // NOT the reader's address, which is what the cache used at first: the cache
+  // is `thread_local` and so outlives an index, and a reader allocated after
+  // one is destroyed can land on the same address — after which block 0 of
+  // the old permutation is served for block 0 of the new one, silently. A
+  // process that closes an index and opens another is enough to hit it, and
+  // QLever's own `IndexTestHelpers` does exactly that: with the cache on, it
+  // read a pattern index of 0 where the index it had just built says
+  // `NoPattern`. A counter is never recycled.
+  const uint64_t cacheId_ = nextCacheId();
+  static uint64_t nextCacheId();
+
   // The allocator used to allocate intermediate buffers.
   mutable Allocator allocator_;
 
